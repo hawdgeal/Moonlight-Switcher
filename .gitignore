@@ -1,0 +1,11 @@
+# Built app
+*.exe
+
+# Personal and runtime files (created on first run)
+settings.ini
+log.txt
+position-*.txt
+
+# Local notes
+HANDOVER-HOST.md
+mailbox/
