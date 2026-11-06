@@ -1090,16 +1090,18 @@ Shortcut = Type the clipboard text | V
         {
             string lastVersion = null, firstCodeVersion = null;
             int idle = 0;
+            DateTime lastReached = DateTime.Now;
             bool active = false;      // a stream is on
             BarConfig cfg = null;
             while (true)
             {
-                bool streaming = false, codeChanged = false;
+                bool streaming = false, codeChanged = false, reached = false;
                 string version = null, settings = null;
                 try
                 {
                     string[] s = Http(baseUrl + "/state").Split('\n');
                     streaming = s[0].Trim() == "streaming";
+                    reached = true;
                     if (s.Length > 1) version = s[1].Trim();
                     if (s.Length > 2)
                     {
@@ -1108,7 +1110,7 @@ Shortcut = Type the clipboard text | V
                         else if (code != firstCodeVersion) codeChanged = true;
                     }
                 }
-                catch { }   // client unreachable counts as "not streaming"
+                catch { }   // client unreachable: handled below
                 if (codeChanged && !preview)
                 {
                     // Bar.cs or host.ps1 changed on the client: exit so the login loop starts the new version.
@@ -1120,11 +1122,20 @@ Shortcut = Type the clipboard text | V
                     try { settings = Http(baseUrl + "/settings.ini"); lastVersion = version; cfg = BarConfig.Parse(settings); } catch { }
                 }
 
-                // Stream started / ended (ended = ~6 s without a stream): show or hide the bar,
-                // and run the start/end commands from settings.ini.
+                // Stream started / ended: show or hide the bar, and run the start/end commands from
+                // settings.ini. Ended = the client says "idle" for ~6 s, or doesn't answer for ~60 s
+                // (so a client app restart or a network blip doesn't undo the stream setup).
                 bool changed = false;
-                if (streaming) { idle = 0; if (!active) { active = true; changed = true; } }
-                else if (++idle >= 12 && active) { active = false; changed = true; }   // ~6 s at 0.5 s per check
+                if (!reached)
+                {
+                    if ((DateTime.Now - lastReached).TotalSeconds >= 60 && active) { active = false; changed = true; }
+                }
+                else
+                {
+                    lastReached = DateTime.Now;
+                    if (streaming) { idle = 0; if (!active) { active = true; changed = true; } }
+                    else if (++idle >= 12 && active) { active = false; changed = true; }   // ~6 s at 0.5 s per check
+                }
                 if (changed && !preview && cfg != null)
                 {
                     // Keyboard first: it's what you notice. Then the slower command (e.g. a script).

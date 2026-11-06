@@ -625,6 +625,7 @@ class ClientApp
     DateTime settingsStamp, lastSettingsCheck, lastTaskbarUpdate;
     readonly Dictionary<string, DateTime> lastCommand = new Dictionary<string, DateTime>();
     bool seenMoonlight;
+    DateTime goneSince = DateTime.MaxValue;
 
     public void Run()
     {
@@ -689,7 +690,9 @@ class ClientApp
         timer.Tick += delegate { OwnerTick(); };
         timer.Start();
 
+        Link.Log("start");
         Application.Run(bar);
+        Link.Log("exit: done");
 
         Hotkey.Remove();
         sw.RestoreTaskbar();   // never leave Moonlight without its taskbar buttons
@@ -715,7 +718,7 @@ class ClientApp
         disconnect.Enabled = Switcher.IsStreamWindow(sw.Stream);
         items.Add(disconnect);
         items.Add(new ToolStripMenuItem("Quit Moonlight", null, delegate { sw.QuitMoonlight(); }));
-        items.Add(new ToolStripMenuItem("Close the switch bar only", null, delegate { bar.Close(); }));
+        items.Add(new ToolStripMenuItem("Close the switch bar only", null, delegate { Link.Log("exit: Close the switch bar only"); bar.Close(); }));
         return items;
     }
 
@@ -734,8 +737,16 @@ class ClientApp
         sw.Refresh();
 
         // Live and die with Moonlight: close once it exits (or if it never starts).
-        if (sw.MoonlightRunning) seenMoonlight = true;
-        else if (seenMoonlight || (DateTime.Now - startedAt).TotalSeconds > 30) { bar.Close(); return; }
+        // Moonlight must look gone for 3 s in a row, so a momentary miss doesn't close the app.
+        if (sw.MoonlightRunning) { seenMoonlight = true; goneSince = DateTime.MaxValue; }
+        else if (goneSince == DateTime.MaxValue) goneSince = DateTime.Now;
+        if (!sw.MoonlightRunning && (DateTime.Now - goneSince).TotalSeconds >= 3 &&
+            (seenMoonlight || (DateTime.Now - startedAt).TotalSeconds > 30))
+        {
+            Link.Log(seenMoonlight ? "exit: Moonlight closed" : "exit: Moonlight didn't start within 30 s");
+            bar.Close();
+            return;
+        }
 
         // While you're on the host, the host's own bar takes over.
         bar.OwnerHidden = sw.HostActive();
@@ -811,6 +822,8 @@ static class Program
         // Draw at the screen's real resolution (sharp at 150%/200% scaling).
         try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
         Link.Folder = Path.GetDirectoryName(Application.ExecutablePath);
+        AppDomain.CurrentDomain.UnhandledException += (s, e) => Link.Log("exit: unexpected error: " + e.ExceptionObject);
+        Application.ThreadException += (s, e) => Link.Log("error (kept running): " + e.Exception);
 
         StartMoonlightIfNeeded();
 
