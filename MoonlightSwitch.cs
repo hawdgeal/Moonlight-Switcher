@@ -126,6 +126,14 @@ static class Link
         return trimmed;
     }
 
+    // When the host bar last asked for /state (DateTime ticks).
+    static long lastStatePoll;
+    public static double SecondsSinceStatePoll()
+    {
+        long t = Interlocked.Read(ref lastStatePoll);
+        return t == 0 ? double.MaxValue : (DateTime.UtcNow - new DateTime(t, DateTimeKind.Utc)).TotalSeconds;
+    }
+
     // Serves the host bar's files to Sunshine/the host. Files are read fresh on every request,
     // so edits apply right away. Only these paths are served.
     public static void Serve()
@@ -158,9 +166,12 @@ static class Link
                         if (path == "/status")
                             body = Encoding.ASCII.GetBytes(IsStreaming() ? "streaming" : "idle");
                         else if (path == "/state")
+                        {
+                            Interlocked.Exchange(ref lastStatePoll, DateTime.UtcNow.Ticks);
                             // streaming/idle, settings.ini version, version of the bar's code (Bar.cs + host.ps1)
                             body = Encoding.ASCII.GetBytes((IsStreaming() ? "streaming" : "idle") + "\n" + FileVersion("settings.ini") +
                                                            "\n" + (FileVersion("Bar.cs") ^ FileVersion("host.ps1")));
+                        }
                         else if (path == "/install-host.ps1")
                         {
                             // Run once on the host: starts the bar at every login (and right now).
@@ -630,6 +641,7 @@ class ClientApp
     readonly Dictionary<string, DateTime> lastCommand = new Dictionary<string, DateTime>();
     bool seenMoonlight;
     DateTime goneSince = DateTime.MaxValue;
+    DateTime closeAt = DateTime.MaxValue;   // set while lingering so the host bar sees the stream end
 
     public void Run()
     {
@@ -742,12 +754,31 @@ class ClientApp
 
         // Live and die with Moonlight: close once it exits (or if it never starts).
         // Moonlight must look gone for 3 s in a row, so a momentary miss doesn't close the app.
-        if (sw.MoonlightRunning) { seenMoonlight = true; goneSince = DateTime.MaxValue; }
+        if (sw.MoonlightRunning)
+        {
+            seenMoonlight = true; goneSince = DateTime.MaxValue;
+            if (closeAt != DateTime.MaxValue) { closeAt = DateTime.MaxValue; tray.Visible = true; Link.Log("Moonlight is back, staying"); }
+        }
         else if (goneSince == DateTime.MaxValue) goneSince = DateTime.Now;
+        if (closeAt != DateTime.MaxValue)
+        {
+            if (DateTime.Now >= closeAt) bar.Close();
+            return;
+        }
         if (!sw.MoonlightRunning && (DateTime.Now - goneSince).TotalSeconds >= 3 &&
             (seenMoonlight || (DateTime.Now - startedAt).TotalSeconds > 30))
         {
             Link.Log(seenMoonlight ? "exit: Moonlight closed" : "exit: Moonlight didn't start within 30 s");
+            // If the host bar is polling, keep answering "idle" for a few seconds (out of sight) so it
+            // ends the stream setup in ~6 s, instead of waiting out its 60 s allowance for outages.
+            if (Link.SecondsSinceStatePoll() < 5)
+            {
+                Link.Log("telling the host bar the stream ended, closing in 8 s");
+                closeAt = DateTime.Now.AddSeconds(8);
+                bar.OwnerHidden = true;
+                tray.Visible = false;
+                return;
+            }
             bar.Close();
             return;
         }
