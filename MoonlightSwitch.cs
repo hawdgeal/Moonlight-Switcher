@@ -183,7 +183,11 @@ static class Link
                                 "$loops = @($all | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'boot\\.ps1' })\n" +
                                 "$bars = @($all | Where-Object { $loops.ProcessId -contains $_.ParentProcessId })\n" +
                                 "foreach ($p in $loops + $bars) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }\n" +
-                                "Start-Process $s.TargetPath -ArgumentList $s.Arguments -WindowStyle Hidden\n" +
+                                // Started through WMI so the loop isn't a child of this shell: closing the terminal
+                                // (or the app that opened it) would otherwise take the loop and the bar down with it.
+                                "$hide = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }\n" +
+                                "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ('\"' + $s.TargetPath + '\" ' + $s.Arguments); ProcessStartupInformation = $hide }\n" +
+                                "if ($r.ReturnValue -ne 0) { Start-Process $s.TargetPath -ArgumentList $s.Arguments -WindowStyle Hidden }\n" +
                                 "Write-Host \"Installed: $lnk\"\n" +
                                 "Write-Host 'The bar now starts at every login. To remove it, delete that shortcut and restart.'\n");
                         }
