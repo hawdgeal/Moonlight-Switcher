@@ -165,7 +165,10 @@ static class Link
                         {
                             // Run once on the host: starts the bar at every login (and right now).
                             string me = ((IPEndPoint)c.Client.LocalEndPoint).Address.ToString();
-                            string loop = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"while ($true) { try { iex (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://" +
+                            // The loop notes its start in %TEMP%\MoonlightSwitch-loop.log, so a missing loop can
+                            // be told apart from one that never started.
+                            string loop = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"ac ($env:TEMP+'\\MoonlightSwitch-loop.log') ((Get-Date -f s)+' loop start '+$PID); " +
+                                          "while ($true) { try { iex (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://" +
                                           me + ":" + ServerPort + "/boot.ps1).Content } catch {}; Start-Sleep 10 }\"";
                             body = Encoding.UTF8.GetBytes(
                                 "$lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Moonlight Switch bar.lnk'\n" +
@@ -175,6 +178,11 @@ static class Link
                                 "$s.WindowStyle = 7\n" +
                                 "$s.Description = 'Moonlight Switch host bar (downloads the bar from " + me + ")'\n" +
                                 "$s.Save()\n" +
+                                // Stop a loop that's already running (and the bar it started), so only one is left.
+                                "$all = @(Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\")\n" +
+                                "$loops = @($all | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'boot\\.ps1' })\n" +
+                                "$bars = @($all | Where-Object { $loops.ProcessId -contains $_.ParentProcessId })\n" +
+                                "foreach ($p in $loops + $bars) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }\n" +
                                 "Start-Process $s.TargetPath -ArgumentList $s.Arguments -WindowStyle Hidden\n" +
                                 "Write-Host \"Installed: $lnk\"\n" +
                                 "Write-Host 'The bar now starts at every login. To remove it, delete that shortcut and restart.'\n");
@@ -190,11 +198,16 @@ static class Link
                             // A bar that ran for a while and then closed (Restart this bar, or a code update)
                             // starts again right away. One that fails quickly (client unreachable, broken code)
                             // falls back to the login loop's 10 s retry.
+                            // Each start and exit goes to %TEMP%\MoonlightSwitch-loop.log (kept small).
                             body = Encoding.UTF8.GetBytes(
+                                "$log = Join-Path $env:TEMP 'MoonlightSwitch-loop.log'\n" +
+                                "if ((Test-Path $log) -and (Get-Item $log).Length -gt 100KB) { Remove-Item $log -ErrorAction SilentlyContinue }\n" +
                                 "do {\n" +
                                 "  $t = Get-Date\n" +
-                                "  Start-Process powershell -WindowStyle Hidden -Wait -ArgumentList '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + encoded + "'\n" +
-                                "} while (((Get-Date) - $t).TotalSeconds -gt 20)\n");
+                                "  $p = Start-Process powershell -WindowStyle Hidden -Wait -PassThru -ArgumentList '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + encoded + "'\n" +
+                                "  $secs = [int]((Get-Date) - $t).TotalSeconds\n" +
+                                "  Add-Content $log ((Get-Date -f s) + ' bar ' + $p.Id + ' exited with ' + $p.ExitCode + ' after ' + $secs + ' s')\n" +
+                                "} while ($secs -gt 20)\n");
                         }
                         else
                         {
