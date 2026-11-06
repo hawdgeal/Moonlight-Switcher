@@ -334,7 +334,11 @@ Shortcut = Type the clipboard text | V
         [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
         [DllImport("user32.dll")] public static extern int GetKeyboardLayoutList(int n, IntPtr[] list);
-        [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint param, ref IntPtr value, uint flags);
+        [DllImport("user32.dll", SetLastError = true)] public static extern bool SystemParametersInfo(uint action, uint param, ref IntPtr value, uint flags);
+        [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint threadId);
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+        public delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+        [DllImport("user32.dll")] public static extern IntPtr SetWinEventHook(uint evMin, uint evMax, IntPtr module, WinEventProc proc, uint pid, uint thread, uint flags);
         [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     }
@@ -1043,6 +1047,7 @@ Shortcut = Type the clipboard text | V
             bar.PinnedOpen = preview;
             bar.Load += delegate
             {
+                if (!preview) WatchForeground();
                 var poll = new Thread(() => Poll(bar, baseUrl, preview));
                 poll.IsBackground = true;
                 poll.Start();
@@ -1139,7 +1144,7 @@ Shortcut = Type the clipboard text | V
                 if (changed && !preview && cfg != null)
                 {
                     // Keyboard first: it's what you notice. Then the slower command (e.g. a script).
-                    SwitchKeyboard(active ? cfg.HostKeyboardStream : cfg.HostKeyboardIdle);
+                    SwitchKeyboard(cfg, active);
                     RunCommand(active ? cfg.HostStreamStart : cfg.HostStreamEnd);
                 }
                 CheckSleep(streaming, idle);
@@ -1172,25 +1177,70 @@ Shortcut = Type the clipboard text | V
             return IntPtr.Zero;
         }
 
+        // Keyboard layouts from settings.ini, and whether the stream one applies (set by SwitchKeyboard).
+        static IntPtr streamHkl, idleHkl;
+        static volatile bool keyboardStreaming;
+        static DateTime keyboardSwitchedAt;
+        static BarNative.WinEventProc onForeground;   // kept in a field so the hook's callback isn't collected
+
         // Switches the keyboard layout: the default for new windows, plus the window you're typing in.
-        // Unlike a broadcast to every window, this leaves the taskbar's language indicator alone.
-        static void SwitchKeyboard(string hex)
+        // Other windows switch as they come to the front (FixLayout). Unlike a broadcast to every
+        // window, this leaves the taskbar's language indicator alone.
+        static void SwitchKeyboard(BarConfig cfg, bool streaming)
         {
-            IntPtr hkl = FindKeyboardLayout(hex);
+            streamHkl = FindKeyboardLayout(cfg.HostKeyboardStream);
+            idleHkl = FindKeyboardLayout(cfg.HostKeyboardIdle);
+            keyboardSwitchedAt = DateTime.Now;
+            keyboardStreaming = streaming;
+            IntPtr hkl = streaming ? streamHkl : idleHkl;
             if (hkl == IntPtr.Zero) return;
             try
             {
-                BarNative.SystemParametersInfo(0x005A /* SPI_SETDEFAULTINPUTLANG */, 0, ref hkl, 2 /* SPIF_SENDCHANGE */);
-                BarNative.PostMessage(BarNative.GetForegroundWindow(), 0x0050 /* WM_INPUTLANGCHANGEREQUEST */, IntPtr.Zero, hkl);
-                // The stream start can shuffle windows; ask the active window once more a moment later.
-                var again = new Thread(delegate ()
-                {
-                    Thread.Sleep(1500);
-                    try { BarNative.PostMessage(BarNative.GetForegroundWindow(), 0x0050, IntPtr.Zero, hkl); } catch { }
-                });
-                again.IsBackground = true;
-                again.Start();
+                IntPtr set = hkl;
+                bool ok = BarNative.SystemParametersInfo(0x005A /* SPI_SETDEFAULTINPUTLANG */, 0, ref set, 2 /* SPIF_SENDCHANGE */);
+                int err = Marshal.GetLastWin32Error();
+                IntPtr now = IntPtr.Zero;
+                BarNative.SystemParametersInfo(0x0059 /* SPI_GETDEFAULTINPUTLANG */, 0, ref now, 0);
+                LogLine("keyboard " + (streaming ? "stream " : "idle ") + Hex(hkl) + ": default " +
+                        (ok ? "set" : "not set (error " + err + ")") + ", now " + Hex(now));
+                FixLayout(BarNative.GetForegroundWindow());
             }
+            catch (Exception e) { LogLine("keyboard switch failed: " + e.Message); }
+        }
+
+        // Called on the bar's thread (it has the message loop the hook needs).
+        static void WatchForeground()
+        {
+            onForeground = (hook, ev, hwnd, idObject, idChild, thread, time) => FixLayout(hwnd);
+            BarNative.SetWinEventHook(3 /* EVENT_SYSTEM_FOREGROUND */, 3, IntPtr.Zero, onForeground, 0, 0, 0 /* out of context */);
+        }
+
+        // Puts the window coming to the front on the wanted layout. While streaming: the stream layout.
+        // In the 10 minutes after: windows still on the stream layout go back to the idle one (any
+        // other layout was picked by hand and stays).
+        static void FixLayout(IntPtr hwnd)
+        {
+            try
+            {
+                if (hwnd == IntPtr.Zero) return;
+                bool streaming = keyboardStreaming;
+                IntPtr target = streaming ? streamHkl : idleHkl;
+                if (target == IntPtr.Zero) return;
+                uint pid;
+                IntPtr current = BarNative.GetKeyboardLayout(BarNative.GetWindowThreadProcessId(hwnd, out pid));
+                if (Hex(current) == Hex(target)) return;
+                if (!streaming && (Hex(current) != Hex(streamHkl) || (DateTime.Now - keyboardSwitchedAt).TotalMinutes > 10)) return;
+                BarNative.PostMessage(hwnd, 0x0050 /* WM_INPUTLANGCHANGEREQUEST */, IntPtr.Zero, target);
+            }
+            catch { }
+        }
+
+        static string Hex(IntPtr hkl) { return (hkl.ToInt64() & 0xFFFFFFFFL).ToString("X8"); }
+
+        // Notes go to the same log as the login loop: %TEMP%\MoonlightSwitch-loop.log.
+        static void LogLine(string text)
+        {
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "MoonlightSwitch-loop.log"), DateTime.Now.ToString("s") + " bar " + text + "\r\n"); }
             catch { }
         }
 
