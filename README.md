@@ -15,7 +15,7 @@ and your own desktop (the **client**) without fiddling with Moonlight's keyboard
   desktop. A tray icon (with Moonlight's icon) shows it again.
 - **Draggable, dockable bars.** Drag a bar to any edge of any screen. Colors, labels, sizes and
   behaviour live in one `settings.ini`, applied live.
-- **Host-side extras:** switch the host's keyboard layout while streaming and run your own commands
+- **Host-side extras:** switch the host's keyboard layout while streaming (for example to match the client's) and run your own commands
   when a stream starts and ends, without Sunshine's Command Preparations.
 - **Edit once, update both.** The host bar is downloaded from the client, so changes to `Bar.cs` or
   `settings.ini` on the client reach the host by themselves.
@@ -80,7 +80,8 @@ is in `Bar.cs`). Highlights:
 | `ClientEdge`, `HostEdge` (+ `Offset`) | Default positions (dragging overrides them) |
 | `ConfirmQuit` | Ask before quitting |
 | `MoonlightInTray` | Hide the stream from the taskbar while you're on your desktop |
-| `HostKeyboardStream`, `HostKeyboardIdle` | Host keyboard layout during / after a stream, e.g. `04090409` (US) |
+| `HostKeyboardStream` | Host keyboard layout during a stream: `client` (match the client's layout) or an id like `04090409` (US) |
+| `HostKeyboardIdle` | Host keyboard layout after a stream (empty = back to the host's own) |
 | `HostStreamStart`, `HostStreamEnd` | Commands the host runs when a stream starts / ends |
 | `Shortcut = label \| KEY` | Entries of the shortcuts menu (sent as `Ctrl+Alt+Shift+KEY`) |
 

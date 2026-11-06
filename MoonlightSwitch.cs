@@ -94,12 +94,15 @@ static class Link
     }
 
     // True while Moonlight has a stream window open (minimized counts).
-    public static bool IsStreaming()
+    public static bool IsStreaming() { return StreamWindow() != IntPtr.Zero; }
+
+    // Moonlight's stream window, or IntPtr.Zero.
+    static IntPtr StreamWindow()
     {
         var pids = new HashSet<uint>();
         foreach (var p in Process.GetProcessesByName("Moonlight")) { pids.Add((uint)p.Id); p.Dispose(); }
-        if (pids.Count == 0) return false;
-        bool found = false;
+        if (pids.Count == 0) return IntPtr.Zero;
+        IntPtr found = IntPtr.Zero;
         Native.EnumWindows(delegate (IntPtr h, IntPtr l)
         {
             uint pid;
@@ -107,10 +110,21 @@ static class Link
             if (!pids.Contains(pid) || !Native.IsWindowVisible(h)) return true;
             var cls = new StringBuilder(128);
             Native.GetClassName(h, cls, cls.Capacity);
-            if (cls.ToString().StartsWith("SDL")) { found = true; return false; }
+            if (cls.ToString().StartsWith("SDL")) { found = h; return false; }
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+
+    // The keyboard layout you're typing with on this PC, as 8 hex digits: the stream window's, or
+    // else the one of the window in front. The host bar can follow it (HostKeyboardStream = client).
+    static string ClientKeyboard()
+    {
+        IntPtr w = StreamWindow();
+        if (w == IntPtr.Zero) w = BarNative.GetForegroundWindow();
+        uint pid;
+        IntPtr hkl = BarNative.GetKeyboardLayout(Native.GetWindowThreadProcessId(w, out pid));
+        return (hkl.ToInt64() & 0xFFFFFFFFL).ToString("X8");
     }
 
     static long FileVersion(string name)
@@ -168,9 +182,11 @@ static class Link
                         else if (path == "/state")
                         {
                             Interlocked.Exchange(ref lastStatePoll, DateTime.UtcNow.Ticks);
-                            // streaming/idle, settings.ini version, version of the bar's code (Bar.cs + host.ps1)
+                            // streaming/idle, settings.ini version, version of the bar's code (Bar.cs + host.ps1),
+                            // this PC's keyboard layout
                             body = Encoding.ASCII.GetBytes((IsStreaming() ? "streaming" : "idle") + "\n" + FileVersion("settings.ini") +
-                                                           "\n" + (FileVersion("Bar.cs") ^ FileVersion("host.ps1")));
+                                                           "\n" + (FileVersion("Bar.cs") ^ FileVersion("host.ps1")) +
+                                                           "\n" + ClientKeyboard());
                         }
                         else if (path == "/install-host.ps1")
                         {

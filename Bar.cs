@@ -146,8 +146,10 @@ MoonlightInTray = true   # hide Moonlight's taskbar buttons; use the tray icon i
 #   HostStreamStart = powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""C:\path\to\script.ps1"" -Mode stream
 HostStreamStart =
 HostStreamEnd   =
-# Keyboard layout to switch to on the host, as 8 hex digits (e.g. 04090409 = US). It must be
-# installed there. Switched instantly by the bar itself. Leave empty to not switch.
+# Keyboard layout on the host while streaming. ""client"" = the layout you're typing with on this PC
+# (it follows if you switch layouts mid-stream), or a layout id as 8 hex digits (e.g. 04090409 = US).
+# It must be installed on the host. Leave empty to not switch.
+# HostKeyboardIdle: the layout after the stream. Leave empty to go back to the host's own one.
 HostKeyboardStream =
 HostKeyboardIdle   =
 
@@ -1101,7 +1103,7 @@ Shortcut = Type the clipboard text | V
             while (true)
             {
                 bool streaming = false, codeChanged = false, reached = false;
-                string version = null, settings = null;
+                string version = null, settings = null, clientKeyboard = null;
                 try
                 {
                     string[] s = Http(baseUrl + "/state").Split('\n');
@@ -1114,6 +1116,7 @@ Shortcut = Type the clipboard text | V
                         if (firstCodeVersion == null) firstCodeVersion = code;
                         else if (code != firstCodeVersion) codeChanged = true;
                     }
+                    if (s.Length > 3) clientKeyboard = s[3].Trim();
                 }
                 catch { }   // client unreachable: handled below
                 if (codeChanged && !preview)
@@ -1144,9 +1147,11 @@ Shortcut = Type the clipboard text | V
                 if (changed && !preview && cfg != null)
                 {
                     // Keyboard first: it's what you notice. Then the slower command (e.g. a script).
-                    SwitchKeyboard(cfg, active);
+                    SwitchKeyboard(cfg, active, clientKeyboard);
                     RunCommand(active ? cfg.HostStreamStart : cfg.HostStreamEnd);
                 }
+                else if (active && !preview && cfg != null && FollowsClient(cfg) && clientKeyboard != null && clientKeyboard != followedKeyboard)
+                    SwitchKeyboard(cfg, true, clientKeyboard);   // you switched layouts on the client mid-stream
                 CheckSleep(streaming, idle);
 
                 bool show = active;
@@ -1186,10 +1191,35 @@ Shortcut = Type the clipboard text | V
         // Switches the keyboard layout: the default for new windows, plus the window you're typing in.
         // Other windows switch as they come to the front (FixLayout). Unlike a broadcast to every
         // window, this leaves the taskbar's language indicator alone.
-        static void SwitchKeyboard(BarConfig cfg, bool streaming)
+        static void SwitchKeyboard(BarConfig cfg, bool streaming, string clientKeyboard)
         {
-            streamHkl = FindKeyboardLayout(cfg.HostKeyboardStream);
-            idleHkl = FindKeyboardLayout(cfg.HostKeyboardIdle);
+            if (string.IsNullOrEmpty(cfg.HostKeyboardStream)) { keyboardStreaming = false; streamHkl = idleHkl = IntPtr.Zero; return; }
+            try
+            {
+                // The host's own layout from before the stream, to go back to when HostKeyboardIdle is
+                // empty. Kept in a file so a bar restart mid-stream doesn't mistake the stream layout for it.
+                string before = Path.Combine(Path.GetDirectoryName(PositionFile()), "keyboard-before-stream.txt");
+                if (streaming && !File.Exists(before))
+                {
+                    IntPtr d = IntPtr.Zero;
+                    BarNative.SystemParametersInfo(0x0059 /* SPI_GETDEFAULTINPUTLANG */, 0, ref d, 0);
+                    Directory.CreateDirectory(Path.GetDirectoryName(before));
+                    File.WriteAllText(before, Hex(d));
+                }
+                string beforeHex = File.Exists(before) ? File.ReadAllText(before).Trim() : "";
+                if (!streaming) File.Delete(before);
+
+                if (FollowsClient(cfg))
+                {
+                    followedKeyboard = clientKeyboard;
+                    streamHkl = FindLayoutOrLanguage(clientKeyboard);
+                    if (streaming && streamHkl == IntPtr.Zero)
+                        LogLine("keyboard: the client's layout " + (clientKeyboard ?? "(not reported)") + " isn't installed on this PC");
+                }
+                else streamHkl = FindKeyboardLayout(cfg.HostKeyboardStream);
+                idleHkl = FindKeyboardLayout(string.IsNullOrEmpty(cfg.HostKeyboardIdle) ? beforeHex : cfg.HostKeyboardIdle);
+            }
+            catch (Exception e) { LogLine("keyboard setup failed: " + e.Message); }
             keyboardSwitchedAt = DateTime.Now;
             keyboardStreaming = streaming;
             IntPtr hkl = streaming ? streamHkl : idleHkl;
@@ -1236,6 +1266,32 @@ Shortcut = Type the clipboard text | V
         }
 
         static string Hex(IntPtr hkl) { return (hkl.ToInt64() & 0xFFFFFFFFL).ToString("X8"); }
+
+        static string followedKeyboard;   // the client layout the stream layout was last taken from
+
+        static bool FollowsClient(BarConfig cfg)
+        {
+            return string.Equals((cfg.HostKeyboardStream ?? "").Trim(), "client", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // The installed layout with this id, or else the language's standard layout (e.g. 04090409 for
+        // F0010409), or else any layout for that language (the last 4 digits). The exact variant
+        // may not be installed here, and one language can hold several layouts (even another
+        // country's), so the standard one comes first.
+        static IntPtr FindLayoutOrLanguage(string hex)
+        {
+            IntPtr exact = FindKeyboardLayout(hex);
+            if (exact != IntPtr.Zero || string.IsNullOrEmpty(hex) || hex.Length != 8) return exact;
+            IntPtr standard = FindKeyboardLayout(hex.Substring(4) + hex.Substring(4));
+            if (standard != IntPtr.Zero) return standard;
+            int n = BarNative.GetKeyboardLayoutList(0, null);
+            if (n <= 0) return IntPtr.Zero;
+            var list = new IntPtr[n];
+            BarNative.GetKeyboardLayoutList(n, list);
+            foreach (var h in list)
+                if (Hex(h).EndsWith(hex.Substring(4).ToUpperInvariant())) return h;
+            return IntPtr.Zero;
+        }
 
         // Notes go to the same log as the login loop: %TEMP%\MoonlightSwitch-loop.log.
         static void LogLine(string text)
