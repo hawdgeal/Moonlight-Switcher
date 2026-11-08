@@ -17,8 +17,8 @@ and your own desktop (the **client**) without fiddling with Moonlight's keyboard
   behaviour live in one `settings.ini`, applied live.
 - **Host-side extras:** switch the host's keyboard layout while streaming (for example to match the client's) and run your own commands
   when a stream starts and ends, without Sunshine's Command Preparations.
-- **Edit once, update both.** The host bar is downloaded from the client, so changes to `Bar.cs` or
-  `settings.ini` on the client reach the host by themselves.
+- **One settings file.** The host bar reads its looks and keyboard settings from the client's
+  `settings.ini`, live. Code updates are installed on the host when you choose to.
 
 The client app starts Moonlight with it and exits when Moonlight closes.
 
@@ -35,8 +35,8 @@ The client app starts Moonlight with it and exits when Moonlight closes.
 ### Client (the PC running Moonlight)
 
 1. Put this folder anywhere, for example `C:\Tools\MoonlightSwitch`.
-2. Run `build.cmd`. It compiles `MoonlightSwitch.exe` with the C# compiler built into Windows and
-   starts it.
+2. Run `build.cmd`. It compiles `MoonlightSwitch.exe` and the host bar `MoonlightSwitchHost.exe`
+   with the C# compiler built into Windows, and starts `MoonlightSwitch.exe`.
 3. Make a shortcut to `MoonlightSwitch.exe` and use it instead of Moonlight's own shortcut. It opens
    Moonlight, the bar and the tray icon together. Clicking it again while Moonlight is running brings
    Moonlight to the front.
@@ -48,23 +48,26 @@ the tray menu.
 
 ### Host (the PC running Sunshine)
 
-With the client app running, open PowerShell on the host and run, once (replace the address with
-your client's IP):
+With the client app running, open a browser on the host at the client's address (for example
+`http://192.168.1.50:47711/`) and follow the page:
 
-```powershell
-iex (Invoke-WebRequest -UseBasicParsing http://192.168.1.50:47711/install-host.ps1).Content
-```
+1. Download `MoonlightSwitchHost.exe` and run it. It isn't signed, so Windows may warn about an
+   unknown publisher (**More info** → **Run anyway**).
+2. Check that the fingerprint it shows matches the one on the page, and click **Install**.
 
-This adds a shortcut to the host's Startup folder. At every login it starts a hidden loop that
-downloads and runs the host bar from the client whenever the client is reachable. The bar shows up
-while you're streaming and hides otherwise. To remove it, delete
-`Moonlight Switch bar.lnk` from the Startup folder (`shell:startup`) and sign out.
+It copies itself to `%LOCALAPPDATA%\MoonlightSwitch`, adds `Moonlight Switch bar.lnk` to the Startup
+folder and starts. The bar shows up while you're streaming and hides otherwise.
 
-To preview the host bar without a stream:
+Commands the host should run when a stream starts or ends go in
+`%LOCALAPPDATA%\MoonlightSwitch\host.ini` on the host (`HostStreamStart`, `HostStreamEnd`).
 
-```powershell
-powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -UseBasicParsing http://192.168.1.50:47711/host.ps1).Content)) -Client 192.168.1.50 -Preview"
-```
+**Updating:** after you rebuild on the client, the host bar's menu shows *Update available*. Open
+the install page and repeat the steps.
+
+**Removing:** delete `Moonlight Switch bar.lnk` from the Startup folder (`shell:startup`), end
+`MoonlightSwitchHost.exe` in Task Manager and delete `%LOCALAPPDATA%\MoonlightSwitch`.
+
+To preview the host bar without a stream: `MoonlightSwitchHost.exe -Preview -Client 192.168.1.50`.
 
 ## Settings
 
@@ -82,23 +85,26 @@ is in `Bar.cs`). Highlights:
 | `MoonlightInTray` | Hide the stream from the taskbar while you're on your desktop |
 | `HostKeyboardStream` | Host keyboard layout during a stream: `client` (match the client's layout) or an id like `04090409` (US) |
 | `HostKeyboardIdle` | Host keyboard layout after a stream (empty = back to the host's own) |
-| `HostStreamStart`, `HostStreamEnd` | Commands the host runs when a stream starts / ends |
 | `Shortcut = label \| KEY` | Entries of the shortcuts menu (sent as `Ctrl+Alt+Shift+KEY`) |
 
 ## How it works
 
 - **Client:** `MoonlightSwitch.cs` + `Bar.cs`, compiled into `MoonlightSwitch.exe`. It finds
   Moonlight's windows, switches between them with a low-level keyboard hook and Moonlight's own
-  shortcuts, and serves `host.ps1`, `Bar.cs` and `settings.ini` over HTTP on port 47711.
-- **Host:** `host.ps1` downloads `Bar.cs`, compiles it in PowerShell with `Add-Type` and runs the
-  bar. The bar polls the client's `/state` twice a second (streaming or not, settings and code
-  versions) and sends its requests (`CLIENT`, `DISCONNECT`, `QUIT`, `KEY x`) over UDP port 47710.
+  shortcuts, and serves the stream state, `settings.ini` and the host install page over HTTP on
+  port 47711.
+- **Host:** `HostMain.cs` + `Bar.cs`, compiled into `MoonlightSwitchHost.exe` and installed on the
+  host. The bar polls the client's `/state` twice a second (streaming or not, settings version,
+  latest host program, keyboard layout) and sends its requests (`CLIENT`, `DISCONNECT`, `QUIT`,
+  `KEY x`) over UDP port 47710.
 
 ## Security
 
-Use this on a home network you trust. The HTTP server and the UDP requests have no authentication,
-and the host runs whatever code the client's address serves. Anything on your network that can pose
-as the client's IP could run code on the host. Don't expose ports 47710/47711 to the internet.
+Use this on a home network you trust. The HTTP server and the UDP requests have no authentication.
+The host bar never runs code or commands it receives: it only reads the stream state and display
+settings, and its commands live in the host's own `host.ini`. Something on your network posing as
+the client could still show or hide the bar or change its looks or keyboard layout, and anything
+on your network can send the client app requests such as Quit. Don't expose ports 47710/47711 to the internet.
 
 ## Notes
 

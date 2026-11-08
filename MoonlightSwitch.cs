@@ -1,8 +1,9 @@
-// MoonlightSwitch (client PC) - opens Moonlight, shows the switch bar, serves the host bar to
-// the host PC, and switches between the stream (host) and your desktop (client).
+// MoonlightSwitch (client PC) - opens Moonlight, shows the switch bar, switches between the
+// stream (host) and your desktop (client), and tells the host bar when a stream is on.
 //
-// How the bars look and behave: Bar.cs and settings.ini (both shared with the host).
-// After editing a .cs file, run build.cmd.
+// How the bars look and behave: Bar.cs and settings.ini (settings are shared with the host bar).
+// The host bar is its own program (HostMain.cs + Bar.cs), installed on the host from the page
+// this app serves. After editing a .cs file, run build.cmd.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -148,8 +149,45 @@ static class Link
         return t == 0 ? double.MaxValue : (DateTime.UtcNow - new DateTime(t, DateTimeKind.Utc)).TotalSeconds;
     }
 
-    // Serves the host bar's files to Sunshine/the host. Files are read fresh on every request,
-    // so edits apply right away. Only these paths are served.
+    public const string HostProgramName = "MoonlightSwitchHost.exe";
+
+    // SHA-256 of the host program next to this exe (built by build.cmd), or "" if there's none.
+    // Recomputed only when the file changes.
+    static string hostFingerprint = "";
+    static DateTime hostFingerprintStamp;
+    static string HostProgramFingerprint()
+    {
+        try
+        {
+            string full = Path.Combine(Folder, HostProgramName);
+            if (!File.Exists(full)) return "";
+            DateTime stamp = File.GetLastWriteTimeUtc(full);
+            if (stamp != hostFingerprintStamp) { hostFingerprint = Fingerprint.OfFile(full); hostFingerprintStamp = stamp; }
+            return hostFingerprint;
+        }
+        catch { return ""; }
+    }
+
+    static string InstallPage()
+    {
+        string fp = HostProgramFingerprint();
+        return "<!doctype html><html><head><meta charset=\"utf-8\"><title>Moonlight Switch host bar</title>" +
+               "<style>body{font:16px/1.5 Segoe UI,sans-serif;max-width:40em;margin:2em auto;padding:0 1em;color:#222}" +
+               "code{background:#eee;padding:.1em .3em;border-radius:3px;word-break:break-all}a.b{display:inline-block;background:#3a6df0;color:#fff;" +
+               "padding:.6em 1.2em;border-radius:6px;text-decoration:none}</style></head><body>" +
+               "<h1>Moonlight Switch host bar</h1>" +
+               (fp == "" ? "<p>The host program isn't built yet. Run <code>build.cmd</code> on the client PC.</p>" :
+               "<p><a class=\"b\" href=\"/" + HostProgramName + "\">Download " + HostProgramName + "</a></p>" +
+               "<ol><li>Run the downloaded file. Windows may warn that it's from an unknown publisher: choose <b>More info</b> &rarr; <b>Run anyway</b>.</li>" +
+               "<li>Check that the fingerprint it shows matches this one:<br><code>" + fp + "</code></li>" +
+               "<li>Click <b>Install</b>. The bar is copied to your user folder and starts at every sign-in.</li></ol>" +
+               "<p>Commands to run when a stream starts or ends go in <code>%LOCALAPPDATA%\\MoonlightSwitch\\host.ini</code> on this PC.</p>" +
+               "<p>To update later, open this page again and repeat. The bar's menu tells you when an update is available.</p>") +
+               "</body></html>";
+    }
+
+    // Serves the host bar's data (stream state, settings) and the install page with the host
+    // program. Nothing served here gets run on the host by itself.
     public static void Serve()
     {
         var thread = new Thread(delegate ()
@@ -177,82 +215,42 @@ static class Link
                         if (!quiet) Log("request from " + c.Client.RemoteEndPoint + ": " + request);
 
                         byte[] body = null;
+                        string type = "text/plain; charset=utf-8";
                         if (path == "/status")
                             body = Encoding.ASCII.GetBytes(IsStreaming() ? "streaming" : "idle");
                         else if (path == "/state")
                         {
                             Interlocked.Exchange(ref lastStatePoll, DateTime.UtcNow.Ticks);
-                            // streaming/idle, settings.ini version, version of the bar's code (Bar.cs + host.ps1),
-                            // this PC's keyboard layout
+                            // streaming/idle, settings.ini version, fingerprint of the current host program
+                            // (so the host bar can say an update is available), this PC's keyboard layout
                             body = Encoding.ASCII.GetBytes((IsStreaming() ? "streaming" : "idle") + "\n" + FileVersion("settings.ini") +
-                                                           "\n" + (FileVersion("Bar.cs") ^ FileVersion("host.ps1")) +
-                                                           "\n" + ClientKeyboard());
+                                                           "\n" + HostProgramFingerprint() + "\n" + ClientKeyboard());
                         }
-                        else if (path == "/install-host.ps1")
+                        else if (path == "/settings.ini")
                         {
-                            // Run once on the host: starts the bar at every login (and right now).
-                            string me = ((IPEndPoint)c.Client.LocalEndPoint).Address.ToString();
-                            // The loop notes its start in %TEMP%\MoonlightSwitch-loop.log, so a missing loop can
-                            // be told apart from one that never started.
-                            string loop = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"ac ($env:TEMP+'\\MoonlightSwitch-loop.log') ((Get-Date -f s)+' loop start '+$PID); " +
-                                          "while ($true) { try { iex (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://" +
-                                          me + ":" + ServerPort + "/boot.ps1).Content } catch {}; Start-Sleep 10 }\"";
-                            body = Encoding.UTF8.GetBytes(
-                                "$lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Moonlight Switch bar.lnk'\n" +
-                                "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)\n" +
-                                "$s.TargetPath = \"$env:WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"\n" +
-                                "$s.Arguments = '" + loop.Replace("'", "''") + "'\n" +
-                                "$s.WindowStyle = 7\n" +
-                                "$s.Description = 'Moonlight Switch host bar (downloads the bar from " + me + ")'\n" +
-                                "$s.Save()\n" +
-                                // Stop a loop that's already running (and the bar it started), so only one is left.
-                                "$all = @(Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\")\n" +
-                                "$loops = @($all | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'boot\\.ps1' })\n" +
-                                "$bars = @($all | Where-Object { $loops.ProcessId -contains $_.ParentProcessId })\n" +
-                                "foreach ($p in $loops + $bars) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }\n" +
-                                // Started through WMI so the loop isn't a child of this shell: closing the terminal
-                                // (or the app that opened it) would otherwise take the loop and the bar down with it.
-                                "$hide = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }\n" +
-                                "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ('\"' + $s.TargetPath + '\" ' + $s.Arguments); ProcessStartupInformation = $hide }\n" +
-                                "if ($r.ReturnValue -ne 0) { Start-Process $s.TargetPath -ArgumentList $s.Arguments -WindowStyle Hidden }\n" +
-                                "Write-Host \"Installed: $lnk\"\n" +
-                                "Write-Host 'The bar now starts at every login. To remove it, delete that shortcut and restart.'\n");
+                            // Looks and keyboard settings only: the host never runs anything from this file.
+                            string full = Path.Combine(Folder, "settings.ini");
+                            if (File.Exists(full)) body = StripBom(File.ReadAllBytes(full));
                         }
-                        else if (path == "/boot.ps1")
+                        else if (path == "/")
                         {
-                            // One round of the host's login loop: run the bar in its own process and wait
-                            // until it exits (it exits by itself when its code changes, to pick up the update).
-                            string me = ((IPEndPoint)c.Client.LocalEndPoint).Address.ToString();
-                            string barCmd = "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://" + me + ":" + ServerPort +
-                                            "/host.ps1).Content)) -Client " + me;
-                            string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(barCmd));
-                            // A bar that ran for a while and then closed (Restart this bar, or a code update)
-                            // starts again right away. One that fails quickly (client unreachable, broken code)
-                            // falls back to the login loop's 10 s retry.
-                            // Each start and exit goes to %TEMP%\MoonlightSwitch-loop.log (kept small).
-                            body = Encoding.UTF8.GetBytes(
-                                "$log = Join-Path $env:TEMP 'MoonlightSwitch-loop.log'\n" +
-                                "if ((Test-Path $log) -and (Get-Item $log).Length -gt 100KB) { Remove-Item $log -ErrorAction SilentlyContinue }\n" +
-                                "do {\n" +
-                                "  $t = Get-Date\n" +
-                                "  $p = Start-Process powershell -WindowStyle Hidden -Wait -PassThru -ArgumentList '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + encoded + "'\n" +
-                                "  $secs = [int]((Get-Date) - $t).TotalSeconds\n" +
-                                "  Add-Content $log ((Get-Date -f s) + ' bar ' + $p.Id + ' exited with ' + $p.ExitCode + ' after ' + $secs + ' s')\n" +
-                                "} while ($secs -gt 20)\n");
+                            // Install page for the host, opened in a browser there.
+                            body = Encoding.UTF8.GetBytes(InstallPage());
+                            type = "text/html; charset=utf-8";
                         }
-                        else
+                        else if (path == "/" + HostProgramName)
                         {
-                            string file = path == "/host.ps1" ? "host.ps1" : path == "/bar.cs" ? "Bar.cs" : path == "/settings.ini" ? "settings.ini" : null;
-                            if (file != null)
+                            string full = Path.Combine(Folder, HostProgramName);
+                            if (File.Exists(full))
                             {
-                                string full = Path.Combine(Folder, file);
-                                if (File.Exists(full)) body = StripBom(File.ReadAllBytes(full));
+                                body = File.ReadAllBytes(full);
+                                type = "application/octet-stream\r\nContent-Disposition: attachment; filename=\"" + HostProgramName + "\"";
                             }
                         }
 
                         string status = body != null ? "200 OK" : "404 Not Found";
-                        if (body == null) body = Encoding.ASCII.GetBytes("Not found");
-                        string head = "HTTP/1.1 " + status + "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length +
+                        if (body == null) { body = Encoding.ASCII.GetBytes("Not found"); type = "text/plain; charset=utf-8"; }
+                        string head = "HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\nContent-Length: " + body.Length +
                                       "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
                         byte[] hb = Encoding.ASCII.GetBytes(head);
                         s.Write(hb, 0, hb.Length);

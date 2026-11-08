@@ -1,9 +1,9 @@
 // Bar.cs - the look and behaviour of both MoonlightSwitch bars.
 //
-// Compiled into MoonlightSwitch.exe (the bar on this PC) and downloaded + compiled by host.ps1
-// (the bar on the host), so editing this file changes both. Colors, labels and sizes live in
-// settings.ini, which both bars reload live. After editing this file, run build.cmd for the
-// client's bar; the host bar notices the change and restarts with it by itself.
+// Compiled into MoonlightSwitch.exe (the bar on this PC) and MoonlightSwitchHost.exe (the bar on
+// the host), so editing this file changes both. Colors, labels and sizes live in settings.ini,
+// which both bars reload live. After editing this file, run build.cmd, then reinstall the host
+// bar from the install page (its menu says when an update is available).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -63,8 +63,6 @@ namespace MoonlightSwitchUI
         public bool ShowQuitButton = true;
         public bool ConfirmQuit = true;
         public bool MoonlightInTray = true;
-        public string HostStreamStart = "";   // command the host bar runs on the host when a stream starts
-        public string HostStreamEnd = "";     // ...and when it ends
         public string HostKeyboardStream = "";   // keyboard layout (8 hex digits) on the host while streaming
         public string HostKeyboardIdle = "";     // ...and after the stream
 
@@ -140,12 +138,9 @@ Danger              = #E5484D       # color of the quit confirmation
 # --- Moonlight ---
 MoonlightInTray = true   # hide Moonlight's taskbar buttons; use the tray icon instead
 
-# --- Commands the host bar runs on the host ---
-# Run when a stream starts and when it ends (about 6 seconds after), instead of Sunshine's
-# Command Preparations. Leave empty for none. Example:
-#   HostStreamStart = powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""C:\path\to\script.ps1"" -Mode stream
-HostStreamStart =
-HostStreamEnd   =
+# --- Host ---
+# Commands the host runs when a stream starts or ends are set on the host itself, in
+# %LOCALAPPDATA%\MoonlightSwitch\host.ini, never here.
 # Keyboard layout on the host while streaming. ""client"" = the layout you're typing with on this PC
 # (it follows if you switch layouts mid-stream), or a layout id as 8 hex digits (e.g. 04090409 = US).
 # It must be installed on the host. Leave empty to not switch.
@@ -224,8 +219,6 @@ Shortcut = Type the clipboard text | V
                 case "showquitbutton": ShowQuitButton = B(v); break;
                 case "confirmquit": ConfirmQuit = B(v); break;
                 case "moonlightintray": MoonlightInTray = B(v); break;
-                case "hoststreamstart": HostStreamStart = v; break;
-                case "hoststreamend": HostStreamEnd = v; break;
                 case "hostkeyboardstream": HostKeyboardStream = v; break;
                 case "hostkeyboardidle": HostKeyboardIdle = v; break;
                 case "shortcut":
@@ -997,11 +990,33 @@ Shortcut = Type the clipboard text | V
 
     // ---------------------------------------------------------------- host side
 
-    // Runs the bar on the host. Started by host.ps1, which Sunshine runs at each stream start.
+    // SHA-256 of a file as 64 hex digits: the host program's fingerprint, shown on the install
+    // page and in the installer so you can check you're installing what this PC built.
+    public static class Fingerprint
+    {
+        public static string OfFile(string path)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            using (var f = File.OpenRead(path))
+                return BitConverter.ToString(sha.ComputeHash(f)).Replace("-", "");
+        }
+    }
+
+    // Runs the bar on the host, inside the host program (HostMain.cs). It only reads data from the
+    // client (stream state, settings.ini) and sends it requests; it never runs anything it receives.
     public static class HostAgent
     {
         const int SwitchPort = 47710, ServerPort = 47711;
         const string MsgPrefix = "MOONLIGHTSWITCH/1 ";
+
+        // Set by the host program (HostMain.cs):
+        // the command to run when a stream starts (true) or ends (false), read from the host's own host.ini;
+        public static Func<bool, string> LocalCommand;
+        // the SHA-256 of the running program, to tell when the client has a newer one.
+        public static string OwnFingerprint = "";
+        // Set when "Restart this bar" closes the bar; the host program then starts itself again.
+        public static bool RestartRequested;
+        static volatile bool updateAvailable;
 
         public static void Run(string clientIp, bool preview)
         {
@@ -1022,6 +1037,7 @@ Shortcut = Type the clipboard text | V
                     items.Add(new ToolStripSeparator());
                     items.Add(new ToolStripMenuItem("Disconnect (keep Moonlight open)", null, delegate { Send(client, "DISCONNECT"); }));
                     items.Add(new ToolStripMenuItem("Sleep host", null, delegate { SleepHost(client); }));
+                    if (updateAvailable) items.Add(UpdateItem(baseUrl));
                     bar.ShowItems(items, shortcuts);
                 }, null, null);
             shortcuts.GapBefore = true;
@@ -1041,7 +1057,8 @@ Shortcut = Type the clipboard text | V
                 items.Add(new ToolStripMenuItem("Quit Moonlight", null, delegate { Send(client, "QUIT"); }));
                 items.Add(new ToolStripMenuItem("Sleep host", null, delegate { SleepHost(client); }));
                 items.Add(new ToolStripSeparator());
-                items.Add(new ToolStripMenuItem("Restart this bar", null, delegate { bar.Close(); }));
+                if (updateAvailable) items.Add(UpdateItem(baseUrl));
+                items.Add(new ToolStripMenuItem("Restart this bar", null, delegate { RestartRequested = true; bar.Close(); }));
                 return items;
             });
             // Only show while this PC is being streamed (or right away in preview mode).
@@ -1056,6 +1073,15 @@ Shortcut = Type the clipboard text | V
             };
             Application.EnableVisualStyles();
             Application.Run(bar);
+        }
+
+        // Opens the client's install page in the browser; installing stays your call.
+        static ToolStripMenuItem UpdateItem(string baseUrl)
+        {
+            return new ToolStripMenuItem("Update available: open the install page", null, delegate
+            {
+                try { Process.Start(baseUrl + "/"); } catch { }
+            });
         }
 
         // "Sleep host": end the stream (Moonlight stays open on the client, ready to reconnect after
@@ -1095,14 +1121,14 @@ Shortcut = Type the clipboard text | V
         // Every half second: is the client streaming, and did settings.ini or the bar's code change?
         static void Poll(BarWindow bar, string baseUrl, bool preview)
         {
-            string lastVersion = null, firstCodeVersion = null;
+            string lastVersion = null;
             int idle = 0;
             DateTime lastReached = DateTime.Now;
             bool active = false;      // a stream is on
             BarConfig cfg = null;
             while (true)
             {
-                bool streaming = false, codeChanged = false, reached = false;
+                bool streaming = false, reached = false;
                 string version = null, settings = null, clientKeyboard = null;
                 try
                 {
@@ -1112,19 +1138,14 @@ Shortcut = Type the clipboard text | V
                     if (s.Length > 1) version = s[1].Trim();
                     if (s.Length > 2)
                     {
-                        string code = s[2].Trim();
-                        if (firstCodeVersion == null) firstCodeVersion = code;
-                        else if (code != firstCodeVersion) codeChanged = true;
+                        // The client's current host program: a different one means an update is available.
+                        string latest = s[2].Trim();
+                        updateAvailable = latest.Length == 64 && OwnFingerprint.Length == 64 &&
+                                          !string.Equals(latest, OwnFingerprint, StringComparison.OrdinalIgnoreCase);
                     }
                     if (s.Length > 3) clientKeyboard = s[3].Trim();
                 }
                 catch { }   // client unreachable: handled below
-                if (codeChanged && !preview)
-                {
-                    // Bar.cs or host.ps1 changed on the client: exit so the login loop starts the new version.
-                    try { bar.BeginInvoke((MethodInvoker)delegate { bar.Close(); }); } catch { }
-                    return;
-                }
                 if (version != null && version != lastVersion)
                 {
                     try { settings = Http(baseUrl + "/settings.ini"); lastVersion = version; cfg = BarConfig.Parse(settings); } catch { }
@@ -1148,7 +1169,7 @@ Shortcut = Type the clipboard text | V
                 {
                     // Keyboard first: it's what you notice. Then the slower command (e.g. a script).
                     SwitchKeyboard(cfg, active, clientKeyboard);
-                    RunCommand(active ? cfg.HostStreamStart : cfg.HostStreamEnd);
+                    if (LocalCommand != null) RunCommand(LocalCommand(active));   // from the host's own host.ini
                 }
                 else if (active && !preview && cfg != null && FollowsClient(cfg) && clientKeyboard != null && clientKeyboard != followedKeyboard)
                     SwitchKeyboard(cfg, true, clientKeyboard);   // you switched layouts on the client mid-stream
@@ -1293,10 +1314,15 @@ Shortcut = Type the clipboard text | V
             return IntPtr.Zero;
         }
 
-        // Notes go to the same log as the login loop: %TEMP%\MoonlightSwitch-loop.log.
-        static void LogLine(string text)
+        // The host bar's log: %TEMP%\MoonlightSwitch-host.log, started over when it gets big.
+        public static void LogLine(string text)
         {
-            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "MoonlightSwitch-loop.log"), DateTime.Now.ToString("s") + " bar " + text + "\r\n"); }
+            try
+            {
+                string path = Path.Combine(Path.GetTempPath(), "MoonlightSwitch-host.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 100000) File.Delete(path);
+                File.AppendAllText(path, DateTime.Now.ToString("s") + " " + text + "\r\n");
+            }
             catch { }
         }
 
