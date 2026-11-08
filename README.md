@@ -83,6 +83,7 @@ is in `Bar.cs`). Highlights:
 | `ClientEdge`, `HostEdge` (+ `Offset`) | Default positions (dragging overrides them) |
 | `ConfirmQuit` | Ask before quitting |
 | `MoonlightInTray` | Hide the stream from the taskbar while you're on your desktop |
+| `MoonlightResolution` | `screen` = stream at this PC's screen size, set each time the app starts Moonlight |
 | `HostKeyboardStream` | Host keyboard layout during a stream: `client` (match the client's layout) or an id like `04090409` (US) |
 | `HostKeyboardIdle` | Host keyboard layout after a stream (empty = back to the host's own) |
 | `Shortcut = label \| KEY` | Entries of the shortcuts menu (sent as `Ctrl+Alt+Shift+KEY`) |

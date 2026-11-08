@@ -859,10 +859,32 @@ static class Program
         string exe = MoonlightExe();
         if (exe != null)
         {
+            MatchMoonlightResolution();
             try { Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) }); } catch { }
             return;
         }
         MessageBox.Show("Couldn't find Moonlight.exe.", "Moonlight Switch", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    // MoonlightResolution = screen: sets Moonlight's stream resolution to this PC's screen size
+    // before starting it (Moonlight reads it at startup). The screen can be a virtual one, e.g.
+    // 1920x1080 while this PC is itself streamed to a headset, so the host's picture matches it.
+    static void MatchMoonlightResolution()
+    {
+        try
+        {
+            var cfg = BarConfig.Parse(File.ReadAllText(Path.Combine(Link.Folder, "settings.ini")));
+            if (!string.Equals(cfg.MoonlightResolution.Trim(), "screen", StringComparison.OrdinalIgnoreCase)) return;
+            Rectangle b = Screen.PrimaryScreen.Bounds;   // real pixels: this app is DPI aware
+            using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Moonlight Game Streaming Project\Moonlight"))
+            {
+                if (Convert.ToInt32(k.GetValue("width", 0)) == b.Width && Convert.ToInt32(k.GetValue("height", 0)) == b.Height) return;
+                k.SetValue("width", b.Width, Microsoft.Win32.RegistryValueKind.DWord);
+                k.SetValue("height", b.Height, Microsoft.Win32.RegistryValueKind.DWord);
+                Link.Log("Moonlight resolution set to " + b.Width + "x" + b.Height + " (this screen)");
+            }
+        }
+        catch { }
     }
 
     [STAThread]

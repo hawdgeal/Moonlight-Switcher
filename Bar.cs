@@ -63,6 +63,7 @@ namespace MoonlightSwitchUI
         public bool ShowQuitButton = true;
         public bool ConfirmQuit = true;
         public bool MoonlightInTray = true;
+        public string MoonlightResolution = "";   // "screen" = match this PC's screen when starting Moonlight
         public string HostKeyboardStream = "";   // keyboard layout (8 hex digits) on the host while streaming
         public string HostKeyboardIdle = "";     // ...and after the stream
 
@@ -137,6 +138,10 @@ Danger              = #E5484D       # color of the quit confirmation
 
 # --- Moonlight ---
 MoonlightInTray = true   # hide Moonlight's taskbar buttons; use the tray icon instead
+# Stream size Moonlight asks the host for. ""screen"" = this PC's screen size, set each time this app
+# starts Moonlight (so it also follows a virtual screen, e.g. when this PC is itself being streamed).
+# Empty = keep Moonlight's own resolution setting.
+MoonlightResolution =
 
 # --- Host ---
 # Commands the host runs when a stream starts or ends are set on the host itself, in
@@ -219,6 +224,7 @@ Shortcut = Type the clipboard text | V
                 case "showquitbutton": ShowQuitButton = B(v); break;
                 case "confirmquit": ConfirmQuit = B(v); break;
                 case "moonlightintray": MoonlightInTray = B(v); break;
+                case "moonlightresolution": MoonlightResolution = v; break;
                 case "hostkeyboardstream": HostKeyboardStream = v; break;
                 case "hostkeyboardidle": HostKeyboardIdle = v; break;
                 case "shortcut":
