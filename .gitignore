@@ -5,6 +5,9 @@
 settings.ini
 log.txt
 position-*.txt
+buttons-*.txt
+host-tray.txt
+window-mode.txt
 
 # Local notes
 HANDOVER-HOST.md

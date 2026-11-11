@@ -10,17 +10,32 @@ and your own desktop (the **client**) without fiddling with Moonlight's keyboard
 - **One hotkey:** `Ctrl+Alt+Home` toggles between host and client. The mouse and keyboard are
   released properly when you leave the stream.
 - **Disconnect / Quit / Sleep host.** *Disconnect* ends the stream and keeps Moonlight open.
-  *Quit* closes Moonlight. *Sleep host* (host bar) ends the stream and puts the host to sleep.
+  *Quit* ends the game or desktop session on the host too (like Moonlight's own Quit) and closes
+  Moonlight. *Sleep host* (host bar) ends the stream and puts the host to sleep.
 - **Moonlight in the tray.** Moonlight's stream window stays out of the taskbar while you're on your
   desktop. A tray icon (with Moonlight's icon) shows it again.
-- **Draggable, dockable bars.** Drag a bar to any edge of any screen. Colors, labels, sizes and
-  behaviour live in one `settings.ini`, applied live.
+- **The client's tray on the host.** A button on the host bar opens a mini copy of the client's
+  taskbar corner (keyboard layout, Wi-Fi, volume, battery, time and date), so you can keep an eye
+  on the client from inside the stream. Click its icons for a small Quick Settings with volume and
+  brightness sliders and a mute tile. Drag it anywhere; it hides with the bar.
+- **The host's tray on the client.** During a stream the host sends its own tray info to the client,
+  and the client bar's *Host tray* button shows it (read-only).
+- **Draggable, dockable bars.** Drag a bar to any edge of any screen by its grip. Colors, labels,
+  sizes and behaviour live in one `settings.ini`, applied live.
+- **Your own buttons.** Right-click a bar > *Buttons* to choose which buttons it shows (Disconnect,
+  Sleep host and each Moonlight shortcut can have their own), or to make it *Icons only*. Drag a
+  button along the bar to move it. Point at a button for its name.
+- **Colors.** Right-click the client bar > *Colors* opens a color wheel for each part, with a live
+  preview. Saved in `settings.ini`, so the host bar and the trays follow.
 - **Host-side extras:** switch the host's keyboard layout while streaming (for example to match the client's) and run your own commands
   when a stream starts and ends, without Sunshine's Command Preparations.
 - **One settings file.** The host bar reads its looks and keyboard settings from the client's
   `settings.ini`, live. Code updates are installed on the host when you choose to.
 
-The client app starts Moonlight with it and exits when Moonlight closes.
+The client app starts Moonlight with it and exits when Moonlight closes. It remembers whether you
+last streamed full screen or windowed (even if you switched with `Ctrl+Alt+Shift+X`) and starts
+Moonlight that way. *Back to my PC* minimizes a full screen stream and leaves a windowed one where
+it is.
 
 ## Requirements
 
@@ -60,6 +75,9 @@ folder and starts. The bar shows up while you're streaming and hides otherwise.
 
 Commands the host should run when a stream starts or ends go in
 `%LOCALAPPDATA%\MoonlightSwitch\host.ini` on the host (`HostStreamStart`, `HostStreamEnd`).
+`HostResetLanguageBar` adds a button to the host bar that runs that command on the host, for
+example a script that brings back a missing taskbar language indicator. Only a click on the host
+runs it.
 
 **Updating:** after you rebuild on the client, the host bar's menu shows *Update available*. Open
 the install page and repeat the steps.
@@ -82,6 +100,12 @@ is in `Bar.cs`). Highlights:
 | `HideDelayMs`, `PinOpen` | Auto-hide behaviour |
 | `ClientEdge`, `HostEdge` (+ `Offset`) | Default positions (dragging overrides them) |
 | `ConfirmQuit` | Ask before quitting |
+| `ShowClientPanelButton`, `ClientPanelLabel` | The tray buttons (client tray on the host bar, host tray on the client bar) |
+| `ShowTooltips` | Names and tray details when you point at something |
+
+Each bar keeps its own button choice and order in `buttons-client.txt` (next to the app) or
+`buttons-host.txt` (in `%LOCALAPPDATA%\MoonlightSwitch` on the host). *Buttons > Reset buttons*
+goes back to the defaults.
 | `MoonlightInTray` | Hide the stream from the taskbar while you're on your desktop |
 | `MoonlightResolution` | `screen` = stream at this PC's screen size, set each time the app starts Moonlight |
 | `HostKeyboardStream` | Host keyboard layout during a stream: `client` (match the client's layout) or an id like `04090409` (US) |
@@ -92,12 +116,14 @@ is in `Bar.cs`). Highlights:
 
 - **Client:** `MoonlightSwitch.cs` + `Bar.cs`, compiled into `MoonlightSwitch.exe`. It finds
   Moonlight's windows, switches between them with a low-level keyboard hook and Moonlight's own
-  shortcuts, and serves the stream state, `settings.ini` and the host install page over HTTP on
-  port 47711.
+  shortcuts, and serves the stream state, `settings.ini`, the client panel's info (`/info`) and
+  the host install page over HTTP on port 47711.
 - **Host:** `HostMain.cs` + `Bar.cs`, compiled into `MoonlightSwitchHost.exe` and installed on the
   host. The bar polls the client's `/state` twice a second (streaming or not, settings version,
   latest host program, keyboard layout) and sends its requests (`CLIENT`, `DISCONNECT`, `QUIT`,
-  `KEY x`) over UDP port 47710.
+  `KEY x`, and `VOLUME SET n`, `MUTE`, `BRIGHTNESS SET n` from the client panel) over UDP port 47710.
+  During a stream it also sends its own tray info (`INFO`) to the client only. The host bar
+  doesn't listen for anything.
 
 ## Security
 
@@ -105,7 +131,8 @@ Use this on a home network you trust. The HTTP server and the UDP requests have 
 The host bar never runs code or commands it receives: it only reads the stream state and display
 settings, and its commands live in the host's own `host.ini`. Something on your network posing as
 the client could still show or hide the bar or change its looks or keyboard layout, and anything
-on your network can send the client app requests such as Quit. Don't expose ports 47710/47711 to the internet.
+on your network can send the client app requests such as Quit or a volume or brightness change,
+and read the client panel's info (battery, volume, brightness, Wi-Fi name, keyboard layout, time). Don't expose ports 47710/47711 to the internet.
 
 ## Notes
 

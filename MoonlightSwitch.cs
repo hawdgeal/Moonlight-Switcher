@@ -119,7 +119,7 @@ static class Link
 
     // The keyboard layout you're typing with on this PC, as 8 hex digits: the stream window's, or
     // else the one of the window in front. The host bar can follow it (HostKeyboardStream = client).
-    static string ClientKeyboard()
+    public static string ClientKeyboard()
     {
         IntPtr w = StreamWindow();
         if (w == IntPtr.Zero) w = BarNative.GetForegroundWindow();
@@ -141,8 +141,9 @@ static class Link
         return trimmed;
     }
 
-    // When the host bar last asked for /state (DateTime ticks).
+    // When the host bar last asked for /state (DateTime ticks), and from where: the PC being streamed.
     static long lastStatePoll;
+    public static volatile string HostBarAddress;
     public static double SecondsSinceStatePoll()
     {
         long t = Interlocked.Read(ref lastStatePoll);
@@ -211,7 +212,7 @@ static class Link
                         string path = parts.Length >= 2 ? parts[1] : "/";
                         int q = path.IndexOf('?');
                         if (q >= 0) path = path.Substring(0, q);
-                        bool quiet = path == "/status" || path == "/state";
+                        bool quiet = path == "/status" || path == "/state" || path == "/info";
                         if (!quiet) Log("request from " + c.Client.RemoteEndPoint + ": " + request);
 
                         byte[] body = null;
@@ -221,11 +222,14 @@ static class Link
                         else if (path == "/state")
                         {
                             Interlocked.Exchange(ref lastStatePoll, DateTime.UtcNow.Ticks);
+                            try { HostBarAddress = ((IPEndPoint)c.Client.RemoteEndPoint).Address.ToString(); } catch { }
                             // streaming/idle, settings.ini version, fingerprint of the current host program
                             // (so the host bar can say an update is available), this PC's keyboard layout
                             body = Encoding.ASCII.GetBytes((IsStreaming() ? "streaming" : "idle") + "\n" + FileVersion("settings.ini") +
                                                            "\n" + HostProgramFingerprint() + "\n" + ClientKeyboard());
                         }
+                        else if (path == "/info")
+                            body = Encoding.UTF8.GetBytes(TrayInfo.Text());   // the host's client panel
                         else if (path == "/settings.ini")
                         {
                             // Looks and keyboard settings only: the host never runs anything from this file.
@@ -265,7 +269,8 @@ static class Link
     }
 
     // Calls onCommand (on a background thread) with each request from the host bar:
-    // "CLIENT", "QUIT", "DISCONNECT" or "KEY x".
+    // "CLIENT", "QUIT", "DISCONNECT", "KEY x", volume/brightness requests, or "INFO" + the host's
+    // tray info (shown in the Host tray; never acted on).
     public static void Listen(Action<string> onCommand)
     {
         var thread = new Thread(delegate ()
@@ -279,7 +284,7 @@ static class Link
                 {
                     var from = new IPEndPoint(IPAddress.Any, 0);
                     byte[] data = udp.Receive(ref from);
-                    string msg = Encoding.ASCII.GetString(data);
+                    string msg = Encoding.UTF8.GetString(data);
                     if (msg.StartsWith(MsgPrefix)) onCommand(msg.Substring(MsgPrefix.Length).Trim());
                 }
                 catch { Thread.Sleep(200); }
@@ -287,6 +292,76 @@ static class Link
         });
         thread.IsBackground = true;
         thread.Start();
+    }
+}
+
+// ---------------------------------------------------------------- window mode memory
+
+// Moonlight keeps its window mode in its settings (windowmode: 0 = full screen, 1 = borderless
+// full screen, 2 = windowed), but switching with Ctrl+Alt+Shift+X mid-stream isn't saved. This
+// notes the mode you last streamed in (window-mode.txt) and sets it before Moonlight starts.
+static class WindowMemory
+{
+    const string Key = @"Software\Moonlight Game Streaming Project\Moonlight";
+    static string last;   // "full" or "windowed", as last noted
+
+    static string File_ { get { return Path.Combine(Link.Folder, "window-mode.txt"); } }
+
+    public static void Note(bool fullScreen)
+    {
+        string mode = fullScreen ? "full" : "windowed";
+        if (mode == last) return;
+        last = mode;
+        try
+        {
+            // Keep which full screen mode you use (0 or 1) to go back to it later.
+            string full = "1";
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(Key))
+            {
+                int now = k == null ? 1 : Convert.ToInt32(k.GetValue("windowmode", 1));
+                if (now == 0 || now == 1) full = now.ToString();
+                else
+                {
+                    string saved = Read("fullmode");
+                    if (saved == "0" || saved == "1") full = saved;
+                }
+            }
+            File.WriteAllText(File_, "mode = " + mode + "\r\nfullmode = " + full + "\r\n");
+            Link.Log("window mode noted: " + mode);
+        }
+        catch { }
+    }
+
+    public static void Restore()
+    {
+        try
+        {
+            string mode = Read("mode");
+            if (mode == null) return;
+            int want = mode == "windowed" ? 2 : (Read("fullmode") == "0" ? 0 : 1);
+            using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key))
+            {
+                if (Convert.ToInt32(k.GetValue("windowmode", -1)) == want) return;
+                k.SetValue("windowmode", want, Microsoft.Win32.RegistryValueKind.DWord);
+                Link.Log("Moonlight window mode set to " + (want == 2 ? "windowed" : "full screen") + " (as last streamed)");
+            }
+        }
+        catch { }
+    }
+
+    static string Read(string key)
+    {
+        try
+        {
+            if (!File.Exists(File_)) return null;
+            foreach (string raw in File.ReadAllLines(File_))
+            {
+                int eq = raw.IndexOf('=');
+                if (eq > 0 && raw.Substring(0, eq).Trim() == key) return raw.Substring(eq + 1).Trim();
+            }
+        }
+        catch { }
+        return null;
     }
 }
 
@@ -365,7 +440,15 @@ class Switcher
         Refresh();
         if (Stream == IntPtr.Zero) return;
         IntPtr target = Stream;
-        Link.Log("switch: to client");
+        bool fullScreen = IsFullScreen(target);
+        Link.Log("switch: to client" + (fullScreen ? "" : " (windowed: stays on screen)"));
+        if (!fullScreen)
+        {
+            // A windowed stream stays where it is: just give your desktop the focus back, which
+            // also makes Moonlight let go of the mouse and keyboard.
+            if (Native.GetForegroundWindow() == target) FocusAwayFrom(target);
+            return;
+        }
         if (!HostActive()) { Native.ShowWindow(target, Native.SW_MINIMIZE); return; }
 
         // Moonlight's own minimize shortcut (Ctrl+Alt+Shift+D) releases the mouse and keyboard;
@@ -382,6 +465,17 @@ class Switcher
             if (Native.GetForegroundWindow() == target) FocusAwayFrom(target);
         };
         check.Start();
+    }
+
+    // True when the window covers its whole screen (Moonlight's full screen modes), or is minimized.
+    public static bool IsFullScreen(IntPtr h)
+    {
+        if (h == IntPtr.Zero) return false;
+        if (Native.IsIconic(h)) return true;
+        Native.RECT r;
+        if (!Native.GetWindowRect(h, out r)) return false;
+        Rectangle s = Screen.FromHandle(h).Bounds;
+        return r.Left <= s.Left && r.Top <= s.Top && r.Right >= s.Right && r.Bottom >= s.Bottom;
     }
 
     // ---------- Moonlight's Ctrl+Alt+Shift shortcuts ----------
@@ -424,27 +518,51 @@ class Switcher
         return stream;
     }
 
-    // Ends the stream, then closes Moonlight itself. Moonlight shows its main window again only a
-    // moment after the stream window goes away, so keep asking it to close until it has exited.
+    // Ends the stream, quits the game or desktop session on the host (so Moonlight doesn't offer
+    // to resume it next time), then closes Moonlight itself. Moonlight shows its main window again
+    // only a moment after the stream window goes away, so keep asking it to close until it has exited.
     public void QuitMoonlight()
     {
         Refresh();
         Link.Log("quit Moonlight");
         IntPtr stream = CloseStreamWindow();
         int waited = 0;
+        Process quitApp = null;
+        bool quitStarted = false;
         var poll = new Timer { Interval = 250 };
         poll.Tick += delegate
         {
             waited += 250;
             if (stream != IntPtr.Zero && Native.IsWindow(stream) && waited < 6000) return;   // stream still ending
+            // Moonlight brings its PC list back once the stream ends (and the quit command opens a
+            // small window): keep them out of sight while Moonlight finishes and closes.
+            Refresh();
+            foreach (var h in MoonlightWindows())
+                if (!IsStreamWindow(h)) Native.ShowWindow(h, 0 /* SW_HIDE */);
+            if (!quitStarted)
+            {
+                quitStarted = true;
+                quitApp = QuitHostApp();
+            }
+            if (quitApp != null)
+            {
+                // Moonlight's "quit" asks the host to end its session; give it up to 10 s.
+                bool done = true;
+                try { done = quitApp.HasExited; } catch { }
+                if (!done && waited < 12000) return;
+                if (!done) { try { quitApp.Kill(); } catch { } Link.Log("quit Moonlight: the host didn't confirm the quit in time"); }
+                else Link.Log("quit Moonlight: host session ended");
+                quitApp.Dispose();
+                quitApp = null;
+            }
             Refresh();
             if (!MoonlightRunning) { poll.Stop(); poll.Dispose(); return; }
             if (waited % 1000 == 0)
                 foreach (var h in MoonlightWindows(true))
                     if (!IsStreamWindow(h)) Native.PostMessage(h, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            if (waited >= 15000)
+            if (waited >= 25000)
             {
-                // Still running after 15 s: it's no longer streaming, so ending it is safe.
+                // Still running after 25 s: it's no longer streaming, so ending it is safe.
                 Link.Log("quit Moonlight: did not close by itself, ending it");
                 foreach (var p in Process.GetProcessesByName("Moonlight")) { try { p.Kill(); } catch { } p.Dispose(); }
                 poll.Stop();
@@ -452,6 +570,41 @@ class Switcher
             }
         };
         poll.Start();
+    }
+
+    // Runs "Moonlight.exe quit <host>", which ends the running game or desktop on the host. The
+    // host is the one whose bar is talking to this app, else Moonlight's only saved PC.
+    static Process QuitHostApp()
+    {
+        string exe = Program.MoonlightExe();
+        if (exe == null) return null;
+        string host = Link.SecondsSinceStatePoll() < 30 ? Link.HostBarAddress : null;
+        if (string.IsNullOrEmpty(host))
+        {
+            try
+            {
+                using (var hosts = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Moonlight Game Streaming Project\Moonlight\hosts"))
+                {
+                    var found = new List<string>();
+                    if (hosts != null)
+                        foreach (string n in hosts.GetSubKeyNames())
+                            using (var h = hosts.OpenSubKey(n))
+                            {
+                                string addr = h == null ? null : (h.GetValue("localaddress") as string ?? h.GetValue("hostname") as string);
+                                if (!string.IsNullOrEmpty(addr)) found.Add(addr);
+                            }
+                    if (found.Count == 1) host = found[0];
+                }
+            }
+            catch { }
+        }
+        if (string.IsNullOrEmpty(host)) { Link.Log("quit Moonlight: don't know which PC to end the session on"); return null; }
+        try
+        {
+            Link.Log("quit Moonlight: ending the session on " + host);
+            return Process.Start(new ProcessStartInfo(exe, "quit " + host) { WorkingDirectory = Path.GetDirectoryName(exe), WindowStyle = ProcessWindowStyle.Minimized });
+        }
+        catch (Exception e) { Link.Log("quit Moonlight: couldn't end the host session: " + e.Message); return null; }
     }
 
     // ---------- tray mode ----------
@@ -650,6 +803,9 @@ class ClientApp
     readonly DateTime startedAt = DateTime.Now;
     BarWindow bar;
     NotifyIcon tray;
+    ClientPanel hostTray;              // the host's tray, shown on this PC (read-only)
+    volatile string hostInfo;
+    long hostInfoAt;                   // DateTime ticks (UTC) of the last host info
     string settingsPath;
     DateTime settingsStamp, lastSettingsCheck, lastTaskbarUpdate;
     readonly Dictionary<string, DateTime> lastCommand = new Dictionary<string, DateTime>();
@@ -666,8 +822,10 @@ class ClientApp
         }
 
         var buttons = new List<BarButton>();
-        buttons.Add(new BarButton(c => c.HostLabel, Glyphs.Host, () => sw.SwitchToHost(), () => sw.HostActive(), () => sw.HasStream));
-        buttons.Add(new BarButton(c => c.ClientLabel, Glyphs.Client, () => sw.SwitchToClient(), () => sw.HasStream && !sw.HostActive(), () => sw.HasStream));
+        buttons.Add(new BarButton(c => c.HostLabel, Glyphs.Host, () => sw.SwitchToHost(), () => sw.HostActive(), () => sw.HasStream)
+            .Named("host", "Host (go to the stream)"));
+        buttons.Add(new BarButton(c => c.ClientLabel, Glyphs.Client, () => sw.SwitchToClient(), () => sw.HasStream && !sw.HostActive(), () => sw.HasStream)
+            .Named("client", "Client (back to this PC)"));
         BarButton shortcuts = null;
         shortcuts = new BarButton(c => c.ShortcutsLabel, Glyphs.More,
             () =>
@@ -680,13 +838,40 @@ class ClientApp
             null, () => Switcher.IsStreamWindow(sw.Stream));
         shortcuts.GapBefore = true;
         shortcuts.IsVisible = c => c.ShowShortcutsButton;
+        shortcuts.Named("shortcuts", "Moonlight shortcuts menu");
         buttons.Add(shortcuts);
+        buttons.Add(new BarButton(c => "", Glyphs.Disconnect, () => sw.Disconnect(), null, () => sw.HasStream)
+            .Named("disconnect", "Disconnect (keep Moonlight open)", false));
+        var hostTrayButton = new BarButton(c => "", Glyphs.Panel, () => { hostTray.Toggle(); hostTray.UpdateVisibility(sw.HasStream); },
+                                           () => hostTray.WantOpen, () => sw.HasStream)
+            .Named("hosttray", "Host tray (show or hide)");
+        hostTrayButton.IsVisible = c => c.ShowClientPanelButton;
+        buttons.Insert(2, hostTrayButton);
         BarButton quit = BarButton.Quit(() => sw.QuitMoonlight(), () => sw.MoonlightRunning, () => bar.Config.ConfirmQuit);
         quit.GapBefore = false;
         buttons.Add(quit);
 
         bar = new BarWindow("client", LoadSettings(), buttons, Path.Combine(Link.Folder, "position-client.txt"),
                             () => sw.HasStream ? Screen.FromHandle(sw.Stream) : Screen.PrimaryScreen, MenuItems);
+        bar.ExtraButtons = BarButton.ShortcutButtons(k => sw.PressShortcut(k), () => Switcher.IsStreamWindow(sw.Stream));
+        TrayInfo.Keyboard = Link.ClientKeyboard;
+        hostTray = new ClientPanel("Host", () =>
+        {
+            long at = Interlocked.Read(ref hostInfoAt);
+            if (at == 0 || (DateTime.UtcNow - new DateTime(at, DateTimeKind.Utc)).TotalSeconds > 8) throw new Exception("no recent host info");
+            return hostInfo;
+        }, null, Path.Combine(Link.Folder, "host-tray.txt"));
+        hostTray.ApplyConfig(bar.Config);
+        bar.SaveSetting = (key, value) =>
+        {
+            try
+            {
+                string text = File.Exists(settingsPath) ? File.ReadAllText(settingsPath) : BarConfig.DefaultText;
+                File.WriteAllText(settingsPath, BarConfig.WithLine(text, key, value));
+                bar.ApplyConfig(LoadSettings());
+            }
+            catch (Exception e) { Link.Log("couldn't save " + key + ": " + e.Message); }
+        };
 
         // The tray icon stands in for Moonlight: click it to show or tuck away Moonlight.
         Icon icon = SystemIcons.Application;
@@ -712,7 +897,17 @@ class ClientApp
         bar.Load += delegate
         {
             Hotkey.Install(bar, () => sw.Toggle());
-            Link.Listen(cmd => { try { bar.BeginInvoke((MethodInvoker)delegate { OnRemoteCommand(cmd); }); } catch { } });
+            Link.Listen(cmd =>
+            {
+                if (cmd.StartsWith("INFO\n"))
+                {
+                    // The host's tray info, sent every 2 s during a stream. Only displayed.
+                    hostInfo = cmd.Substring(5);
+                    Interlocked.Exchange(ref hostInfoAt, DateTime.UtcNow.Ticks);
+                    return;
+                }
+                try { bar.BeginInvoke((MethodInvoker)delegate { OnRemoteCommand(cmd); }); } catch { }
+            });
             Link.Serve();
         };
 
@@ -762,9 +957,18 @@ class ClientApp
         catch { return new BarConfig(); }
     }
 
+    DateTime lastWindowCheck;
+
     void OwnerTick()
     {
         sw.Refresh();
+
+        // Note whether the stream is full screen or windowed, for the next time Moonlight starts.
+        if ((DateTime.Now - lastWindowCheck).TotalSeconds >= 1 && Switcher.IsStreamWindow(sw.Stream) && !Native.IsIconic(sw.Stream))
+        {
+            lastWindowCheck = DateTime.Now;
+            WindowMemory.Note(Switcher.IsFullScreen(sw.Stream));
+        }
 
         // Live and die with Moonlight: close once it exits (or if it never starts).
         // Moonlight must look gone for 3 s in a row, so a momentary miss doesn't close the app.
@@ -800,6 +1004,10 @@ class ClientApp
         // While you're on the host, the host's own bar takes over.
         bar.OwnerHidden = sw.HostActive();
 
+        // The host's tray: while a stream is on and you're on this PC's desktop.
+        if (hostTray.Config != bar.Config) hostTray.ApplyConfig(bar.Config);
+        hostTray.UpdateVisibility(sw.HasStream && !sw.HostActive() && bar.Config.ShowClientPanelButton);
+
         // Tray mode: keep Moonlight's taskbar buttons hidden.
         if ((DateTime.Now - lastTaskbarUpdate).TotalMilliseconds > 250)
         {
@@ -827,12 +1035,23 @@ class ClientApp
         DateTime last;
         if (lastCommand.TryGetValue(cmd, out last) && (DateTime.Now - last).TotalMilliseconds < 800) return;
         lastCommand[cmd] = DateTime.Now;
-        Link.Log("request from host: " + cmd);
+        // Volume and brightness come in bursts while you drag a slider: not logged.
+        bool slider = cmd.StartsWith("VOLUME ") || cmd.StartsWith("BRIGHTNESS ") || cmd.StartsWith("MUTE");
+        if (!slider) Link.Log("request from host: " + cmd);
+        if (lastCommand.Count > 200) lastCommand.Clear();
 
         if (cmd == "CLIENT") sw.SwitchToClient();
         else if (cmd == "QUIT") sw.QuitMoonlight();
         else if (cmd == "DISCONNECT") sw.Disconnect();
         else if (cmd.StartsWith("KEY ") && cmd.Length == 5 && char.IsLetter(cmd[4])) sw.PressShortcut(char.ToUpperInvariant(cmd[4]));
+        else
+        {
+            // Volume requests end with " #n", a counter, so quick repeated clicks aren't taken for duplicates.
+            int counter = cmd.IndexOf(" #");
+            string c = counter > 0 ? cmd.Substring(0, counter) : cmd;
+            if (c == "VOLUME UP" || c == "VOLUME DOWN" || c == "MUTE" || c.StartsWith("VOLUME SET ") || c.StartsWith("BRIGHTNESS SET "))
+                TrayInfo.Command(c);
+        }
     }
 }
 
@@ -860,6 +1079,7 @@ static class Program
         if (exe != null)
         {
             MatchMoonlightResolution();
+            WindowMemory.Restore();
             try { Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) }); } catch { }
             return;
         }

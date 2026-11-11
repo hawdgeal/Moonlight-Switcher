@@ -5,7 +5,7 @@ rem It compiles first and swaps the exe after, so the app is down for only a mom
 rem gap would look like the end of the stream to the host bar.
 cd /d "%~dp0"
 set CSC="%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-%CSC% /nologo /target:winexe /out:MoonlightSwitch.new.exe MoonlightSwitch.cs Bar.cs
+%CSC% /nologo /target:winexe /r:System.Management.dll /out:MoonlightSwitch.new.exe MoonlightSwitch.cs Bar.cs
 if errorlevel 1 goto failed
 %CSC% /nologo /target:winexe /r:System.Management.dll /out:MoonlightSwitchHost.new.exe HostMain.cs Bar.cs
 if errorlevel 1 goto failed

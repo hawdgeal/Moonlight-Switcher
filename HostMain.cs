@@ -68,6 +68,7 @@ namespace MoonlightSwitchUI
             AppDomain.CurrentDomain.UnhandledException += (s, e) => HostAgent.LogLine("exit: unexpected error: " + e.ExceptionObject);
             Application.ThreadException += (s, e) => HostAgent.LogLine("error (kept running): " + e.Exception);
             HostAgent.LocalCommand = streaming => HostIni.Read().Get(streaming ? "hoststreamstart" : "hoststreamend");
+            HostAgent.ResetLanguageBarCommand = () => HostIni.Read().Get("hostresetlanguagebar");
             try { HostAgent.OwnFingerprint = Fingerprint.OfFile(exe); } catch { }
             HostAgent.LogLine("start " + (preview ? "(preview) " : "") + "pid " + Process.GetCurrentProcess().Id + ", client " + client +
                               ", fingerprint " + (HostAgent.OwnFingerprint.Length > 12 ? HostAgent.OwnFingerprint.Substring(0, 12) : "?"));
@@ -124,7 +125,10 @@ namespace MoonlightSwitchUI
                     "# Leave empty for none. Read at each stream, so edits apply without a restart. Example:\r\n" +
                     "#   HostStreamStart = powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\path\\to\\script.ps1\" -Mode stream\r\n" +
                     "HostStreamStart =\r\n" +
-                    "HostStreamEnd   =\r\n");
+                    "HostStreamEnd   =\r\n" +
+                    "\r\n" +
+                    "# Command run by the host bar's \"Reset language bar\" button, on this PC. Empty = no button.\r\n" +
+                    "HostResetLanguageBar =\r\n");
                 return;
             }
             var lines = new List<string>(File.ReadAllLines(HostProgram.IniPath));
