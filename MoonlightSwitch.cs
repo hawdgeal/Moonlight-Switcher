@@ -546,12 +546,16 @@ class Switcher
             }
             if (quitApp != null)
             {
-                // Moonlight's "quit" asks the host to end its session; give it up to 10 s.
-                bool done = true;
-                try { done = quitApp.HasExited; } catch { }
-                if (!done && waited < 12000) return;
-                if (!done) { try { quitApp.Kill(); } catch { } Link.Log("quit Moonlight: the host didn't confirm the quit in time"); }
-                else Link.Log("quit Moonlight: host session ended");
+                // Moonlight's "quit" asks the host to end its session, then stays open: watch its log
+                // for the host's answer and close it then. Give it up to 10 s.
+                bool exited = true;
+                try { exited = quitApp.HasExited; } catch { }
+                bool confirmed = QuitConfirmed(quitApp);
+                if (!exited && !confirmed && waited < 12000) return;
+                if (!exited) { try { quitApp.Kill(); } catch { } }
+                Program.NoteQuit();
+                Link.Log(confirmed ? "quit Moonlight: host session ended" :
+                         exited ? "quit Moonlight: quit command finished" : "quit Moonlight: the host didn't confirm the quit in time");
                 quitApp.Dispose();
                 quitApp = null;
             }
@@ -570,6 +574,24 @@ class Switcher
             }
         };
         poll.Start();
+    }
+
+    // True once the quit command's log (Moonlight-<start time>.log in %TEMP%) has the host's answer.
+    static bool QuitConfirmed(Process quit)
+    {
+        try
+        {
+            DateTime started = quit.StartTime;
+            foreach (var f in new DirectoryInfo(Path.GetTempPath()).GetFiles("Moonlight-*.log"))
+            {
+                if (f.CreationTime < started.AddSeconds(-2)) continue;
+                using (var s = new FileStream(f.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var r = new StreamReader(s))
+                    if (r.ReadToEnd().Contains("Quit response")) return true;
+            }
+        }
+        catch { }
+        return false;
     }
 
     // Runs "Moonlight.exe quit <host>", which ends the running game or desktop on the host. The
@@ -1068,6 +1090,59 @@ static class Program
         return null;
     }
 
+    // After Quit, the host takes up to ~45 s to put its screens back. A new stream in that time can
+    // leave the host's own screen off, so Moonlight waits that out (last-quit.txt holds the time).
+    const int HostRestoreSeconds = 45;
+
+    static string LastQuitFile { get { return Path.Combine(Link.Folder, "last-quit.txt"); } }
+
+    public static void NoteQuit()
+    {
+        try { File.WriteAllText(LastQuitFile, DateTime.UtcNow.Ticks.ToString()); } catch { }
+    }
+
+    // Shows a countdown until the host has had time to restore. False = you cancelled.
+    static bool WaitForHostRestore()
+    {
+        double left;
+        try
+        {
+            if (!File.Exists(LastQuitFile)) return true;
+            var at = new DateTime(long.Parse(File.ReadAllText(LastQuitFile).Trim()), DateTimeKind.Utc);
+            left = HostRestoreSeconds - (DateTime.UtcNow - at).TotalSeconds;
+        }
+        catch { return true; }
+        if (left <= 0) return true;
+        Link.Log("start: waiting " + (int)Math.Ceiling(left) + " s for the host to restore its screens after the last quit");
+
+        Application.EnableVisualStyles();
+        DateTime until = DateTime.Now.AddSeconds(left);
+        var form = new Form
+        {
+            Text = "Moonlight Switch", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+            StartPosition = FormStartPosition.CenterScreen, TopMost = true, AutoScaleMode = AutoScaleMode.Dpi,
+            AutoScaleDimensions = new SizeF(96, 96), ClientSize = new Size(360, 120), Font = new Font("Segoe UI", 9.5f),
+        };
+        var label = new Label { Location = new Point(16, 16), Size = new Size(330, 44) };
+        var now = new Button { Text = "Open now", Location = new Point(164, 76), Size = new Size(90, 30), DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", Location = new Point(258, 76), Size = new Size(90, 30), DialogResult = DialogResult.Cancel };
+        form.Controls.AddRange(new Control[] { label, now, cancel });
+        form.AcceptButton = now; form.CancelButton = cancel;
+        var tick = new Timer { Interval = 250 };
+        Action update = () =>
+        {
+            int s = (int)Math.Ceiling((until - DateTime.Now).TotalSeconds);
+            if (s <= 0) { form.DialogResult = DialogResult.OK; return; }
+            label.Text = "The host is still putting its screens back after the last stream.\nOpening Moonlight in " + s + " s...";
+        };
+        tick.Tick += delegate { update(); };
+        update();
+        tick.Start();
+        DialogResult r = form.ShowDialog();
+        tick.Stop(); tick.Dispose(); form.Dispose();
+        return r != DialogResult.Cancel;
+    }
+
     static void StartMoonlightIfNeeded()
     {
         Process[] running = Process.GetProcessesByName("Moonlight");
@@ -1078,6 +1153,7 @@ static class Program
         string exe = MoonlightExe();
         if (exe != null)
         {
+            if (!WaitForHostRestore()) { Link.Log("start: cancelled during the wait after a quit"); Environment.Exit(0); }
             MatchMoonlightResolution();
             WindowMemory.Restore();
             try { Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe) }); } catch { }

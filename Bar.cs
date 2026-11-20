@@ -439,6 +439,9 @@ Shortcut = Type the clipboard text | V
         [DllImport("user32.dll")] public static extern int GetKeyboardLayoutList(int n, IntPtr[] list);
         [DllImport("user32.dll", SetLastError = true)] public static extern bool SystemParametersInfo(uint action, uint param, ref IntPtr value, uint flags);
         [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint threadId);
+        [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+        [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr desktop);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetUserObjectInformation(IntPtr obj, int index, System.Text.StringBuilder info, int length, out int needed);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
         public delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
         [DllImport("user32.dll")] public static extern IntPtr SetWinEventHook(uint evMin, uint evMax, IntPtr module, WinEventProc proc, uint pid, uint thread, uint flags);
@@ -1392,11 +1395,23 @@ Shortcut = Type the clipboard text | V
         public static void Run(string clientIp, bool preview)
         {
             BarWindow.UseCrispScaling();
-            string baseUrl = "http://" + clientIp + ":" + ServerPort;
-            BarConfig cfg;
-            try { cfg = BarConfig.Parse(Http(baseUrl + "/settings.ini")); } catch { cfg = new BarConfig(); }
-            IPAddress client = IPAddress.Parse(clientIp);
-            clientAddress = client;
+            // Client may list several addresses (e.g. the home network's and a VPN's like Tailscale):
+            // the bar uses whichever one answers (FetchState).
+            var ips = new List<IPAddress>();
+            foreach (string part in (clientIp ?? "").Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                IPAddress a;
+                if (IPAddress.TryParse(part.Trim(), out a)) ips.Add(a);
+            }
+            if (ips.Count == 0) ips.Add(IPAddress.Parse(clientIp));   // shows the usual error for a bad address
+            clientIps = ips.ToArray();
+            clientAddress = clientIps[0];
+            BarConfig cfg = null;
+            foreach (var a in clientIps)
+            {
+                try { cfg = BarConfig.Parse(Http(BaseUrlFor(a) + "/settings.ini")); clientAddress = a; break; } catch { }
+            }
+            if (cfg == null) cfg = new BarConfig();
             // The layout of the window you're typing in, for the host tray.
             TrayInfo.Keyboard = () =>
             {
@@ -1406,32 +1421,32 @@ Shortcut = Type the clipboard text | V
 
             BarWindow bar = null;
             var buttons = new List<BarButton>();
-            buttons.Add(new BarButton(c => c.BackLabel, Glyphs.Back, () => Send(client, "CLIENT"), () => true, null).Named("back", "Back to my PC"));
+            buttons.Add(new BarButton(c => c.BackLabel, Glyphs.Back, () => Send(CurrentClient, "CLIENT"), () => true, null).Named("back", "Back to my PC"));
             BarButton shortcuts = null;
             shortcuts = new BarButton(c => c.ShortcutsLabel, Glyphs.More,
                 () =>
                 {
-                    var items = BarWindow.ShortcutItems(bar.Config, k => Send(client, "KEY " + k));
+                    var items = BarWindow.ShortcutItems(bar.Config, k => Send(CurrentClient, "KEY " + k));
                     items.Add(new ToolStripSeparator());
-                    items.Add(new ToolStripMenuItem("Disconnect (keep Moonlight open)", null, delegate { Send(client, "DISCONNECT"); }));
-                    items.Add(new ToolStripMenuItem("Sleep host", null, delegate { SleepHost(client); }));
-                    if (updateAvailable) items.Add(UpdateItem(baseUrl));
+                    items.Add(new ToolStripMenuItem("Disconnect (keep Moonlight open)", null, delegate { Send(CurrentClient, "DISCONNECT"); }));
+                    items.Add(new ToolStripMenuItem("Sleep host", null, delegate { SleepHost(CurrentClient); }));
+                    if (updateAvailable) items.Add(UpdateItem(CurrentBase));
                     bar.ShowItems(items, shortcuts);
                 }, null, null);
             shortcuts.GapBefore = true;
             shortcuts.IsVisible = c => c.ShowShortcutsButton;
             shortcuts.Named("shortcuts", "Moonlight shortcuts menu");
             buttons.Add(shortcuts);
-            buttons.Add(new BarButton(c => "", Glyphs.Disconnect, () => Send(client, "DISCONNECT"), null, null)
+            buttons.Add(new BarButton(c => "", Glyphs.Disconnect, () => Send(CurrentClient, "DISCONNECT"), null, null)
                 .Named("disconnect", "Disconnect (keep Moonlight open)", false));
-            buttons.Add(new BarButton(c => "", Glyphs.Sleep, () => SleepHost(client), null, null)
+            buttons.Add(new BarButton(c => "", Glyphs.Sleep, () => SleepHost(CurrentClient), null, null)
                 .Named("sleep", "Sleep host", false));
-            BarButton quit = BarButton.Quit(() => Send(client, "QUIT"), null, () => bar.Config.ConfirmQuit);
+            BarButton quit = BarButton.Quit(() => Send(CurrentClient, "QUIT"), null, () => bar.Config.ConfirmQuit);
             quit.GapBefore = false;
             buttons.Add(quit);
 
             // The client panel: the client PC's battery, volume, Wi-Fi... in a small floating window.
-            var panel = new ClientPanel("Client", () => Http(baseUrl + "/info"), cmd => Send(client, cmd),
+            var panel = new ClientPanel("Client", () => Http(CurrentBase + "/info"), cmd => Send(CurrentClient, cmd),
                                         Path.Combine(Path.GetDirectoryName(PositionFile()), "client-panel.txt"));
             panel.ApplyConfig(cfg);
             var panelButton = new BarButton(c => c.ClientPanelLabel, Glyphs.Panel, () =>
@@ -1450,26 +1465,26 @@ Shortcut = Type the clipboard text | V
             {
                 var items = new List<ToolStripItem>();
                 var sub = new ToolStripMenuItem("Moonlight shortcuts");
-                foreach (var it in BarWindow.ShortcutItems(bar.Config, k => Send(client, "KEY " + k))) sub.DropDownItems.Add(it);
+                foreach (var it in BarWindow.ShortcutItems(bar.Config, k => Send(CurrentClient, "KEY " + k))) sub.DropDownItems.Add(it);
                 items.Add(sub);
-                items.Add(new ToolStripMenuItem("Disconnect (keep Moonlight open)", null, delegate { Send(client, "DISCONNECT"); }));
-                items.Add(new ToolStripMenuItem("Quit Moonlight", null, delegate { Send(client, "QUIT"); }));
-                items.Add(new ToolStripMenuItem("Sleep host", null, delegate { SleepHost(client); }));
+                items.Add(new ToolStripMenuItem("Disconnect (keep Moonlight open)", null, delegate { Send(CurrentClient, "DISCONNECT"); }));
+                items.Add(new ToolStripMenuItem("Quit Moonlight", null, delegate { Send(CurrentClient, "QUIT"); }));
+                items.Add(new ToolStripMenuItem("Sleep host", null, delegate { SleepHost(CurrentClient); }));
                 items.Add(new ToolStripMenuItem("Client panel", null, delegate { panel.Toggle(); panel.UpdateVisibility(true); }) { Checked = panel.WantOpen });
                 if (hasResetLanguageBar) items.Add(new ToolStripMenuItem("Reset language bar", null, delegate { ResetLanguageBar(); }));
                 items.Add(new ToolStripSeparator());
-                if (updateAvailable) items.Add(UpdateItem(baseUrl));
+                if (updateAvailable) items.Add(UpdateItem(CurrentBase));
                 items.Add(new ToolStripMenuItem("Restart this bar", null, delegate { RestartRequested = true; bar.Close(); }));
                 return items;
             });
-            bar.ExtraButtons = BarButton.ShortcutButtons(k => Send(client, "KEY " + k), null);
+            bar.ExtraButtons = BarButton.ShortcutButtons(k => Send(CurrentClient, "KEY " + k), null);
             // Only show while this PC is being streamed (or right away in preview mode).
             bar.OwnerHidden = !preview;
             bar.PinnedOpen = preview;
             bar.Load += delegate
             {
                 if (!preview) WatchForeground();
-                var poll = new Thread(() => Poll(bar, panel, baseUrl, preview));
+                var poll = new Thread(() => Poll(bar, panel, preview));
                 poll.IsBackground = true;
                 poll.Start();
             };
@@ -1530,7 +1545,7 @@ Shortcut = Type the clipboard text | V
         }
 
         // Every half second: is the client streaming, and did settings.ini or the bar's code change?
-        static void Poll(BarWindow bar, ClientPanel panel, string baseUrl, bool preview)
+        static void Poll(BarWindow bar, ClientPanel panel, bool preview)
         {
             string lastVersion = null;
             int idle = 0;
@@ -1547,7 +1562,7 @@ Shortcut = Type the clipboard text | V
                 string version = null, settings = null, clientKeyboard = null;
                 try
                 {
-                    string[] s = Http(baseUrl + "/state").Split('\n');
+                    string[] s = FetchState().Split('\n');
                     streaming = s[0].Trim() == "streaming";
                     reached = true;
                     if (s.Length > 1) version = s[1].Trim();
@@ -1563,7 +1578,7 @@ Shortcut = Type the clipboard text | V
                 catch { }   // client unreachable: handled below
                 if (version != null && version != lastVersion)
                 {
-                    try { settings = Http(baseUrl + "/settings.ini"); lastVersion = version; cfg = BarConfig.Parse(settings); } catch { }
+                    try { settings = Http(CurrentBase + "/settings.ini"); lastVersion = version; cfg = BarConfig.Parse(settings); } catch { }
                 }
 
                 // Stream started / ended: show or hide the bar, and run the start/end commands from
@@ -1594,6 +1609,7 @@ Shortcut = Type the clipboard text | V
                 if (active && !preview && loops % 20 == 0) MarkStream(true);   // every ~10 s while streaming
                 else if (active && !preview && cfg != null && FollowsClient(cfg) && clientKeyboard != null && clientKeyboard != followedKeyboard)
                     SwitchKeyboard(cfg, true, clientKeyboard);   // you switched layouts on the client mid-stream
+                if (!preview) RunPendingKeyboard();   // held back while the sign-in or lock screen was up
                 CheckSleep(streaming, idle);
 
                 // This PC's tray info, for the client's "Host tray": sent straight to the client
@@ -1676,7 +1692,17 @@ Shortcut = Type the clipboard text | V
         // window, this leaves the taskbar's language indicator alone.
         static void SwitchKeyboard(BarConfig cfg, bool streaming, string clientKeyboard)
         {
-            if (string.IsNullOrEmpty(cfg.HostKeyboardStream)) { keyboardStreaming = false; streamHkl = idleHkl = IntPtr.Zero; return; }
+            if (string.IsNullOrEmpty(cfg.HostKeyboardStream)) { keyboardStreaming = false; streamHkl = idleHkl = IntPtr.Zero; pendingKeyboard = null; return; }
+            // On the sign-in or lock screen, changing the default layout can leave the taskbar
+            // without its language indicator. Wait until you're on your own desktop (RunPendingKeyboard).
+            if (!OnUserDesktop())
+            {
+                if (pendingKeyboard == null) LogLine("keyboard: waiting for the desktop (sign-in or lock screen is up)");
+                pendingKeyboard = new KeyboardRequest { Cfg = cfg, Streaming = streaming, Client = clientKeyboard };
+                followedKeyboard = clientKeyboard;
+                return;
+            }
+            pendingKeyboard = null;
             try
             {
                 // The host's own layout from before the stream, to go back to when HostKeyboardIdle is
@@ -1697,7 +1723,7 @@ Shortcut = Type the clipboard text | V
                     followedKeyboard = clientKeyboard;
                     streamHkl = FindLayoutOrLanguage(clientKeyboard);
                     if (streaming && streamHkl == IntPtr.Zero)
-                        LogLine("keyboard: the client's layout " + (clientKeyboard ?? "(not reported)") + " isn't installed on this PC");
+                        LogLine("keyboard: no keyboard added on this PC matches the client's layout " + (clientKeyboard ?? "(not reported)") + ", leaving it as it is");
                 }
                 else streamHkl = FindKeyboardLayout(cfg.HostKeyboardStream);
                 idleHkl = FindKeyboardLayout(string.IsNullOrEmpty(cfg.HostKeyboardIdle) ? beforeHex : cfg.HostKeyboardIdle);
@@ -1750,6 +1776,68 @@ Shortcut = Type the clipboard text | V
 
         static string Hex(IntPtr hkl) { return (hkl.ToInt64() & 0xFFFFFFFFL).ToString("X8"); }
 
+        // A keyboard switch held back until you're on your own desktop (the latest one wins).
+        class KeyboardRequest { public BarConfig Cfg; public bool Streaming; public string Client; }
+        static KeyboardRequest pendingKeyboard;
+
+        static void RunPendingKeyboard()
+        {
+            var p = pendingKeyboard;
+            if (p == null || !OnUserDesktop()) return;
+            LogLine("keyboard: on the desktop now, switching");
+            SwitchKeyboard(p.Cfg, p.Streaming, p.Client);
+        }
+
+        // True when the screen shows your own desktop ("Default"), not the sign-in, lock or UAC
+        // screen. While one of those is up the input desktop can't be opened, which counts as no.
+        static bool OnUserDesktop()
+        {
+            IntPtr d = BarNative.OpenInputDesktop(0, false, 0x0001 /* DESKTOP_READOBJECTS */);
+            if (d == IntPtr.Zero) return false;
+            try
+            {
+                var name = new System.Text.StringBuilder(256);
+                int needed;
+                if (!BarNative.GetUserObjectInformation(d, 2 /* UOI_NAME */, name, name.Capacity * 2, out needed)) return false;
+                return string.Equals(name.ToString(), "Default", StringComparison.OrdinalIgnoreCase);
+            }
+            finally { BarNative.CloseDesktop(d); }
+        }
+
+        // The keyboards you've added in Windows' language settings, as HKL ids (e.g. "040A0409" for a
+        // Spanish layout under English). Read from HKCU\Keyboard Layout\Preload and Substitutes.
+        // Other layouts can be loaded in the session without being yours (Windows or an app loads
+        // them), so the stream layout is picked from these. Empty if they can't be read.
+        static HashSet<string> AddedKeyboards()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (var preload = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Keyboard Layout\Preload"))
+                using (var subst = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Keyboard Layout\Substitutes"))
+                {
+                    if (preload == null) return set;
+                    foreach (string n in preload.GetValueNames())
+                    {
+                        string klid = (preload.GetValue(n) as string ?? "").Trim();
+                        if (klid.Length != 8) continue;
+                        string lang = klid.Substring(4);
+                        string real = subst != null ? (subst.GetValue(klid) as string ?? klid).Trim() : klid;
+                        if (real.Length != 8) continue;
+                        string device = real.Substring(4);
+                        using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\" + real))
+                        {
+                            string id = k != null ? k.GetValue("Layout Id") as string : null;
+                            if (!string.IsNullOrEmpty(id)) device = (0xF000 | Convert.ToInt32(id, 16)).ToString("X4");
+                        }
+                        set.Add((device + lang).ToUpperInvariant());
+                    }
+                }
+            }
+            catch { set.Clear(); }
+            return set;
+        }
+
         static string followedKeyboard;   // the client layout the stream layout was last taken from
 
         static bool FollowsClient(BarConfig cfg)
@@ -1761,18 +1849,24 @@ Shortcut = Type the clipboard text | V
         // F0010409), or else any layout for that language (the last 4 digits). The exact variant
         // may not be installed here, and one language can hold several layouts (even another
         // country's), so the standard one comes first.
+        // Only keyboards you've added in Windows count (AddedKeyboards), not any layout that happens
+        // to be loaded; no match = the layout stays as it is.
         static IntPtr FindLayoutOrLanguage(string hex)
         {
-            IntPtr exact = FindKeyboardLayout(hex);
-            if (exact != IntPtr.Zero || string.IsNullOrEmpty(hex) || hex.Length != 8) return exact;
-            IntPtr standard = FindKeyboardLayout(hex.Substring(4) + hex.Substring(4));
-            if (standard != IntPtr.Zero) return standard;
+            if (string.IsNullOrEmpty(hex) || hex.Length != 8) return IntPtr.Zero;
+            hex = hex.ToUpperInvariant();
             int n = BarNative.GetKeyboardLayoutList(0, null);
             if (n <= 0) return IntPtr.Zero;
-            var list = new IntPtr[n];
-            BarNative.GetKeyboardLayoutList(n, list);
-            foreach (var h in list)
-                if (Hex(h).EndsWith(hex.Substring(4).ToUpperInvariant())) return h;
+            var loaded = new IntPtr[n];
+            BarNative.GetKeyboardLayoutList(n, loaded);
+            var added = AddedKeyboards();
+            var list = new List<IntPtr>();
+            foreach (var h in loaded)
+                if (added.Count == 0 || added.Contains(Hex(h))) list.Add(h);
+            string lang = hex.Substring(4);
+            foreach (var h in list) if (Hex(h) == hex) return h;
+            foreach (var h in list) if (Hex(h) == lang + lang) return h;
+            foreach (var h in list) if (Hex(h).EndsWith(lang)) return h;
             return IntPtr.Zero;
         }
 
@@ -1814,11 +1908,13 @@ Shortcut = Type the clipboard text | V
             catch { }
         }
 
-        static string Http(string url)
+        static DateTime lastPreferredTry;
+
+        static string Http(string url, int timeoutMs = 2500)
         {
             var req = (HttpWebRequest)WebRequest.Create(url);
-            req.Timeout = 2500;
-            req.ReadWriteTimeout = 2500;
+            req.Timeout = timeoutMs;
+            req.ReadWriteTimeout = timeoutMs;
             using (var resp = req.GetResponse())
             using (var r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
                 return r.ReadToEnd();
@@ -1826,7 +1922,55 @@ Shortcut = Type the clipboard text | V
 
         // Sends a request to the client (CLIENT = switch to it, QUIT = quit Moonlight, KEY x =
         // press Ctrl+Alt+Shift+x in Moonlight): directly, plus every local broadcast address.
-        static IPAddress clientAddress;
+        // clientAddress = the one of the client's addresses that last answered.
+        static volatile IPAddress clientAddress;
+        static IPAddress[] clientIps = new IPAddress[0];
+
+        static IPAddress CurrentClient { get { return clientAddress; } }
+        static string CurrentBase { get { return BaseUrlFor(clientAddress); } }
+
+        static string BaseUrlFor(IPAddress a)
+        {
+            return "http://" + (a.AddressFamily == AddressFamily.InterNetworkV6 ? "[" + a + "]" : a.ToString()) + ":" + ServerPort;
+        }
+
+        // The client's /state, from the address that answered last, or else the first other one that
+        // answers (you took the client PC to another network, or the VPN went up or down).
+        static string FetchState()
+        {
+            IPAddress current = clientAddress;
+            // On a fallback address (e.g. the VPN while away): every ~30 s, see if the first one (the
+            // home network) answers again, and go back to it.
+            if (clientIps.Length > 1 && !current.Equals(clientIps[0]) && (DateTime.UtcNow - lastPreferredTry).TotalSeconds > 30)
+            {
+                lastPreferredTry = DateTime.UtcNow;
+                try
+                {
+                    string s = Http(BaseUrlFor(clientIps[0]) + "/state", 1000);
+                    clientAddress = clientIps[0];
+                    LogLine("client: back on " + clientIps[0]);
+                    return s;
+                }
+                catch { }
+            }
+            try { return Http(BaseUrlFor(current) + "/state"); }
+            catch
+            {
+                foreach (var a in clientIps)
+                {
+                    if (a.Equals(current)) continue;
+                    try
+                    {
+                        string s = Http(BaseUrlFor(a) + "/state");
+                        clientAddress = a;
+                        LogLine("client: now reached at " + a);
+                        return s;
+                    }
+                    catch { }
+                }
+                throw;
+            }
+        }
 
         // To the client only.
         static void SendTo(IPAddress client, string message)

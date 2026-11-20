@@ -32,7 +32,9 @@ and your own desktop (the **client**) without fiddling with Moonlight's keyboard
 - **One settings file.** The host bar reads its looks and keyboard settings from the client's
   `settings.ini`, live. Code updates are installed on the host when you choose to.
 
-The client app starts Moonlight with it and exits when Moonlight closes. It remembers whether you
+The client app starts Moonlight with it and exits when Moonlight closes. Opened within 45 s of a
+*Quit*, it counts down before starting Moonlight (*Open now* skips the wait), because a stream
+started too soon can leave the host's screens set up the way they were during the last one. It remembers whether you
 last streamed full screen or windowed (even if you switched with `Ctrl+Alt+Shift+X`) and starts
 Moonlight that way. *Back to my PC* minimizes a full screen stream and leaves a windowed one where
 it is.
@@ -87,6 +89,19 @@ the install page and repeat the steps.
 
 To preview the host bar without a stream: `MoonlightSwitchHost.exe -Preview -Client 192.168.1.50`.
 
+### Streaming from other networks
+
+Put both PCs on a VPN such as [Tailscale](https://tailscale.com/) instead of opening ports on your
+router. Then:
+
+- In Moonlight, add the host again by its VPN address (*Add PC manually*). It's kept as an extra
+  address of the same PC, so Moonlight uses the home one when it answers. No new pairing.
+- Give the host bar both of the client's addresses, separated by a comma, in the installer or in
+  `host.ini` (`Client = 192.168.1.50, 100.64.0.2`). It uses the first one that answers and goes back
+  to the first within about 30 s once it answers again.
+- Allow the client app through Windows Firewall from the host's home address and from the VPN
+  (for Tailscale, the `Tailscale` interface), rather than from any network.
+
 ## Settings
 
 All options are listed, with comments, in the `settings.ini` created on first run (its default text
@@ -102,15 +117,20 @@ is in `Bar.cs`). Highlights:
 | `ConfirmQuit` | Ask before quitting |
 | `ShowClientPanelButton`, `ClientPanelLabel` | The tray buttons (client tray on the host bar, host tray on the client bar) |
 | `ShowTooltips` | Names and tray details when you point at something |
-
-Each bar keeps its own button choice and order in `buttons-client.txt` (next to the app) or
-`buttons-host.txt` (in `%LOCALAPPDATA%\MoonlightSwitch` on the host). *Buttons > Reset buttons*
-goes back to the defaults.
 | `MoonlightInTray` | Hide the stream from the taskbar while you're on your desktop |
 | `MoonlightResolution` | `screen` = stream at this PC's screen size, set each time the app starts Moonlight |
 | `HostKeyboardStream` | Host keyboard layout during a stream: `client` (match the client's layout) or an id like `04090409` (US) |
 | `HostKeyboardIdle` | Host keyboard layout after a stream (empty = back to the host's own) |
 | `Shortcut = label \| KEY` | Entries of the shortcuts menu (sent as `Ctrl+Alt+Shift+KEY`) |
+
+Each bar keeps its own button choice and order in `buttons-client.txt` (next to the app) or
+`buttons-host.txt` (in `%LOCALAPPDATA%\MoonlightSwitch` on the host). *Buttons > Reset buttons*
+goes back to the defaults.
+
+With `HostKeyboardStream = client`, the host picks from the keyboards added in its own Windows
+language settings: the client's exact layout, else that language's standard one, else any layout
+for that language, and leaves the layout alone when none fits. If the host is on its sign-in or
+lock screen when the stream starts, the switch waits until you're on its desktop.
 
 ## How it works
 
@@ -132,7 +152,9 @@ The host bar never runs code or commands it receives: it only reads the stream s
 settings, and its commands live in the host's own `host.ini`. Something on your network posing as
 the client could still show or hide the bar or change its looks or keyboard layout, and anything
 on your network can send the client app requests such as Quit or a volume or brightness change,
-and read the client panel's info (battery, volume, brightness, Wi-Fi name, keyboard layout, time). Don't expose ports 47710/47711 to the internet.
+and read the client panel's info (battery, volume, brightness, Wi-Fi name, keyboard layout, time). Don't expose ports 47710/47711 to the internet,
+and if you take the client to other networks, limit its firewall rule to the host's addresses
+(see *Streaming from other networks*).
 
 ## Notes
 

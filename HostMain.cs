@@ -118,7 +118,8 @@ namespace MoonlightSwitchUI
                 File.WriteAllText(HostProgram.IniPath,
                     "# Moonlight Switch host bar: settings for this PC only.\r\n" +
                     "\r\n" +
-                    "# The client PC's address (the PC running Moonlight and MoonlightSwitch.exe).\r\n" +
+                    "# The client PC's address (the PC running Moonlight and MoonlightSwitch.exe). Several, comma-\r\n" +
+                    "# separated (e.g. its home address and its Tailscale one): the bar uses whichever answers.\r\n" +
                     "Client = " + client + "\r\n" +
                     "\r\n" +
                     "# Commands to run on this PC when a stream starts, and when it ends (about 6 seconds after).\r\n" +
@@ -153,7 +154,9 @@ namespace MoonlightSwitchUI
             string fingerprint = "";
             try { fingerprint = Fingerprint.OfFile(exe); } catch { }
             string guess = ClientFromDownload(exe);
-            if (guess == "") guess = HostIni.Read().Get("client");
+            string saved = HostIni.Read().Get("client");
+            // Keep a saved list of addresses (e.g. home network + Tailscale) that already has this one.
+            if (guess == "" || Array.IndexOf(SplitAddresses(saved), guess) >= 0) guess = saved;
 
             using (var form = new Form())
             {
@@ -172,9 +175,10 @@ namespace MoonlightSwitchUI
                     AutoSize = true, MaximumSize = new Size(520, 0),
                     Text = "This copies the host bar to " + HostProgram.Folder + " and starts it at every sign-in " +
                            "(Startup folder). It shows the bar while this PC is being streamed with Moonlight.\n\n" +
-                           "Client PC address (the PC running Moonlight):"
+                           "Client PC address (the PC running Moonlight). To reach it from other networks too, " +
+                           "add its VPN address after a comma, e.g. 192.168.1.50, 100.64.0.2:"
                 });
-                var clientBox = new TextBox { Text = guess, Width = 220 };
+                var clientBox = new TextBox { Text = guess, Width = 320 };
                 layout.Controls.Add(clientBox);
                 layout.Controls.Add(new Label { AutoSize = true, Text = "\nFingerprint (should match the install page):" });
                 layout.Controls.Add(new TextBox { Text = fingerprint, ReadOnly = true, Width = 520, Font = new Font(FontFamily.GenericMonospace, 8.5f) });
@@ -191,12 +195,22 @@ namespace MoonlightSwitchUI
                 while (true)
                 {
                     if (form.ShowDialog() != DialogResult.OK) return 1;
-                    string client = clientBox.Text.Trim();
+                    string[] parts = SplitAddresses(clientBox.Text);
                     IPAddress ip;
-                    if (IPAddress.TryParse(client, out ip)) return Install(exe, client);
-                    MessageBox.Show(form, "Enter the client PC's IP address, e.g. 192.168.1.50.", form.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    if (parts.Length > 0 && Array.TrueForAll(parts, p => IPAddress.TryParse(p, out ip)))
+                        return Install(exe, string.Join(", ", parts));
+                    MessageBox.Show(form, "Enter the client PC's IP address, e.g. 192.168.1.50 (more than one: separate them with commas).",
+                                    form.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
+        }
+
+        static string[] SplitAddresses(string s)
+        {
+            var list = new List<string>();
+            foreach (string p in (s ?? "").Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                if (p.Trim().Length > 0) list.Add(p.Trim());
+            return list.ToArray();
         }
 
         static int Install(string exe, string client)

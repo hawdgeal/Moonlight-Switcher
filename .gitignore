@@ -8,6 +8,7 @@ position-*.txt
 buttons-*.txt
 host-tray.txt
 window-mode.txt
+last-quit.txt
 
 # Local notes
 HANDOVER-HOST.md
