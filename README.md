@@ -15,7 +15,7 @@ and your own desktop (the **client**) without fiddling with Moonlight's keyboard
 - **Moonlight in the tray.** Moonlight's stream window stays out of the taskbar while you're on your
   desktop. A tray icon (with Moonlight's icon) shows it again.
 - **The client's tray on the host.** A button on the host bar opens a mini copy of the client's
-  taskbar corner (keyboard layout, Wi-Fi, volume, battery, time and date), so you can keep an eye
+  taskbar corner (keyboard layout, Wi-Fi, volume, battery with Windows 11's own icons, time and date), so you can keep an eye
   on the client from inside the stream. Click its icons for a small Quick Settings with volume and
   brightness sliders and a mute tile. Drag it anywhere; it hides with the bar.
 - **The host's tray on the client.** During a stream the host sends its own tray info to the client,
@@ -26,7 +26,8 @@ and your own desktop (the **client**) without fiddling with Moonlight's keyboard
   Sleep host and each Moonlight shortcut can have their own), or to make it *Icons only*. Drag a
   button along the bar to move it. Point at a button for its name.
 - **Colors.** Right-click the client bar > *Colors* opens a color wheel for each part, with a live
-  preview. Saved in `settings.ini`, so the host bar and the trays follow.
+  preview. Saved in `settings.ini`, so the host bar and the trays follow. The host bar has its own
+  handle and accent colors (red by default), so you can tell the two bars apart at a glance.
 - **Host-side extras:** switch the host's keyboard layout while streaming (for example to match the client's) and run your own commands
   when a stream starts and ends, without Sunshine's Command Preparations.
 - **One settings file.** The host bar reads its looks and keyboard settings from the client's
@@ -110,6 +111,7 @@ is in `Bar.cs`). Highlights:
 | Setting | What it does |
 |---|---|
 | `Background`, `Foreground`, `Accent`, ... | Colors, as `#RRGGBB` or `#AARRGGBB` |
+| `HostAccent`, `HostHandleColor` | The host bar's own accent and handle colors |
 | `Scale`, `FontSize`, `CornerRadius` | Size and shape |
 | `ShowLabels`, `ShowIcons` | Icon-only or text buttons |
 | `HideDelayMs`, `PinOpen` | Auto-hide behaviour |
@@ -130,7 +132,8 @@ goes back to the defaults.
 With `HostKeyboardStream = client`, the host picks from the keyboards added in its own Windows
 language settings: the client's exact layout, else that language's standard one, else any layout
 for that language, and leaves the layout alone when none fits. If the host is on its sign-in or
-lock screen when the stream starts, the switch waits until you're on its desktop.
+lock screen when the stream starts, the switch waits until you're on its desktop. Adding or
+removing a keyboard on the host during a stream is picked up within about 10 s.
 
 ## How it works
 

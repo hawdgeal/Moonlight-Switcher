@@ -1,5 +1,6 @@
 # Built app
 *.exe
+build/
 
 # Personal and runtime files (created on first run)
 settings.ini

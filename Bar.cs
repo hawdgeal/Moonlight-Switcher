@@ -34,6 +34,9 @@ namespace MoonlightSwitchUI
         public Color Accent = Color.FromArgb(90, 140, 255);
         public Color ActiveText = Color.White;
         public Color HandleColor = Color.FromArgb(90, 140, 255);
+        // The host bar's handle and highlighted buttons, so you can tell the two bars apart.
+        public Color HostHandleColor = Color.FromArgb(229, 72, 77);
+        public Color HostAccent = Color.FromArgb(229, 72, 77);
         public double Opacity = 0.97;
         public double IdleOpacity = 0.7;
         public double Scale = 1.0;
@@ -99,6 +102,10 @@ Foreground   = #F0F0F5
 Accent       = #5A8CFF
 ActiveText   = #FFFFFF
 HandleColor  = #5A8CFF
+# The host bar's handle and highlighted buttons (instead of HandleColor and Accent), so you can
+# tell the two bars apart.
+HostHandleColor = #E5484D
+HostAccent      = #E5484D
 
 # --- Look ---
 Opacity      = 0.97     # bar opacity when open (0.1 - 1)
@@ -203,6 +210,8 @@ Shortcut = Type the clipboard text | V
                 case "accent": Accent = ParseColor(v); break;
                 case "activetext": ActiveText = ParseColor(v); break;
                 case "handlecolor": HandleColor = ParseColor(v); break;
+                case "hosthandlecolor": HostHandleColor = ParseColor(v); break;
+                case "hostaccent": HostAccent = ParseColor(v); break;
                 case "opacity": Opacity = Clamp(D(v), 0.1, 1); break;
                 case "idleopacity": IdleOpacity = Clamp(D(v), 0.05, 1); break;
                 case "scale": Scale = Clamp(D(v), 0.5, 3); break;
@@ -505,7 +514,7 @@ Shortcut = Type the clipboard text | V
             this.positionFile = positionFile;
             this.defaultScreen = defaultScreen;
             this.extraMenuItems = extraMenuItems;
-            Config = config ?? new BarConfig();
+            Config = ForRole(config ?? new BarConfig());
             LoadLayout();
             RebuildButtons();
             measure = Graphics.FromImage(measureBitmap);
@@ -529,9 +538,19 @@ Shortcut = Type the clipboard text | V
             try { BarNative.SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch { }
         }
 
+        // The host bar uses its own accent and handle colors (HostAccent, HostHandleColor).
+        BarConfig ForRole(BarConfig c)
+        {
+            if (role != "host") return c;
+            c = c.Copy();
+            c.Accent = c.HostAccent;
+            c.HandleColor = c.HostHandleColor;
+            return c;
+        }
+
         public void ApplyConfig(BarConfig c)
         {
-            Config = c ?? new BarConfig();
+            Config = ForRole(c ?? new BarConfig());
             if (!hasSavedPosition) DefaultPosition();
             font = null;            // rebuild fonts on the next frame
             lastFrameKey = null;
@@ -639,6 +658,8 @@ Shortcut = Type the clipboard text | V
             AddColorItem(menu, "Accent (active button)...", "Accent", c => c.Accent, false);
             AddColorItem(menu, "Text on the accent...", "ActiveText", c => c.ActiveText, false);
             AddColorItem(menu, "Handle (tucked away)...", "HandleColor", c => c.HandleColor, true);
+            AddColorItem(menu, "Host bar's accent...", "HostAccent", c => c.HostAccent, false);
+            AddColorItem(menu, "Host bar's handle...", "HostHandleColor", c => c.HostHandleColor, true);
             AddColorItem(menu, "Quit confirmation...", "Danger", c => c.Danger, false);
             menu.DropDownItems.Add(new ToolStripSeparator());
             menu.DropDownItems.Add(new ToolStripMenuItem("Reset colors", null, delegate
@@ -649,6 +670,8 @@ Shortcut = Type the clipboard text | V
                 SaveSetting("Accent", ColorText(d.Accent));
                 SaveSetting("ActiveText", ColorText(d.ActiveText));
                 SaveSetting("HandleColor", ColorText(d.HandleColor));
+                SaveSetting("HostHandleColor", ColorText(d.HostHandleColor));
+                SaveSetting("HostAccent", ColorText(d.HostAccent));
                 SaveSetting("Danger", ColorText(d.Danger));
             }));
             return menu;
@@ -1609,6 +1632,13 @@ Shortcut = Type the clipboard text | V
                 if (active && !preview && loops % 20 == 0) MarkStream(true);   // every ~10 s while streaming
                 else if (active && !preview && cfg != null && FollowsClient(cfg) && clientKeyboard != null && clientKeyboard != followedKeyboard)
                     SwitchKeyboard(cfg, true, clientKeyboard);   // you switched layouts on the client mid-stream
+                else if (active && !preview && cfg != null && FollowsClient(cfg) && clientKeyboard != null && loops % 20 == 10
+                         && pendingKeyboard == null && KeyboardListKey() != keyboardListUsed)
+                {
+                    // Keyboards were added or removed on this PC mid-stream: pick the stream layout again.
+                    LogLine("keyboard: this PC's keyboards changed, picking the stream layout again");
+                    SwitchKeyboard(cfg, true, clientKeyboard);
+                }
                 if (!preview) RunPendingKeyboard();   // held back while the sign-in or lock screen was up
                 CheckSleep(streaming, idle);
 
@@ -1721,6 +1751,7 @@ Shortcut = Type the clipboard text | V
                 if (FollowsClient(cfg))
                 {
                     followedKeyboard = clientKeyboard;
+                    keyboardListUsed = KeyboardListKey();
                     streamHkl = FindLayoutOrLanguage(clientKeyboard);
                     if (streaming && streamHkl == IntPtr.Zero)
                         LogLine("keyboard: no keyboard added on this PC matches the client's layout " + (clientKeyboard ?? "(not reported)") + ", leaving it as it is");
@@ -1839,6 +1870,15 @@ Shortcut = Type the clipboard text | V
         }
 
         static string followedKeyboard;   // the client layout the stream layout was last taken from
+        static string keyboardListUsed;   // this PC's keyboards (KeyboardListKey) when it was last picked
+
+        // This PC's added keyboards, as one comparable string (checked every ~10 s during a stream).
+        static string KeyboardListKey()
+        {
+            var list = new List<string>(AddedKeyboards());
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            return string.Join(",", list.ToArray());
+        }
 
         static bool FollowsClient(BarConfig cfg)
         {
@@ -3056,14 +3096,16 @@ Shortcut = Type the clipboard text | V
         }
 
         // A small power plug centered in r: two prongs on the left, the body, the cord to the right.
-        void DrawPlug(Graphics g, RectangleF r, Color c)
+        // A small plug centered in r. grow > 0 draws it that much thicker (an outline to draw under it).
+        void DrawPlug(Graphics g, RectangleF r, Color c, float grow)
         {
             float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
             using (var b = new SolidBrush(c))
-            using (var pen = new Pen(c, S(1.1f)))
+            using (var pen = new Pen(c, S(1.1f) + grow * 2))
             {
                 var body = new RectangleF(cx - S(2), cy - S(3), S(4.5f), S(6));
-                using (var path = Round(body, S(1.2f))) g.FillPath(b, path);
+                if (grow > 0) body.Inflate(grow, grow);
+                using (var path = Round(body, S(1.2f) + grow)) g.FillPath(b, path);
                 g.DrawLine(pen, body.X - S(2.8f), cy - S(1.6f), body.X, cy - S(1.6f));
                 g.DrawLine(pen, body.X - S(2.8f), cy + S(1.6f), body.X, cy + S(1.6f));
                 g.DrawLine(pen, body.Right, cy, body.Right + S(3), cy);
@@ -3079,15 +3121,116 @@ Shortcut = Type the clipboard text | V
             // Like Windows: green with a bolt while charging, the text color with a plug when plugged
             // in and full, red when low on battery.
             Color level = charging ? Color.FromArgb(108, 203, 95) : pct <= 15 && !plugged ? Config.Danger : Fg;
+            if (DrawTrayBattery(g, r, pct, charging, plugged)) return;
+            if (icons != null && DrawBatteryGlyph(g, r, pct, charging, plugged, level)) return;
             using (var pen = new Pen(Fg, S(1.2f)))
             using (var path = Round(r, S(2.5f))) g.DrawPath(pen, path);
             Fill(g, new RectangleF(r.Right + S(0.8f), r.Y + r.Height * 0.3f, S(2), r.Height * 0.4f), S(0.8f), Fg);
             float inner = (r.Width - S(3)) * Math.Max(0.06f, pct / 100f);
             Fill(g, new RectangleF(r.X + S(1.5f), r.Y + S(1.5f), inner, r.Height - S(3)), S(1.5f), level);
-            if (plugged && !charging) DrawPlug(g, r, Bg);   // plugged in, not charging (full): a plug
-            else if (charging)                               // charging: a bolt
-                using (var f = Make("Segoe Fluent Icons", S(10)) ?? Make("Segoe MDL2 Assets", S(10)))
-                    DrawText(g, "", f, Bg, r, StringAlignment.Center);
+            // The plug or bolt is drawn in the text color with an outline in the background color, so
+            // it shows over both the colored level and the empty part of a low battery.
+            if (plugged && !charging) { DrawPlug(g, r, Bg, S(1.4f)); DrawPlug(g, r, Fg, 0); }   // plugged in, not charging: a plug
+            else if (charging)                                                              // charging: a bolt
+            {
+                float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+                PointF[] bolt = {
+                    new PointF(cx + S(1.2f), cy - S(5)), new PointF(cx - S(2.6f), cy + S(0.7f)),
+                    new PointF(cx - S(0.2f), cy + S(0.7f)), new PointF(cx - S(1.2f), cy + S(5)),
+                    new PointF(cx + S(2.6f), cy - S(0.7f)), new PointF(cx + S(0.2f), cy - S(0.7f)) };
+                using (var path = new GraphicsPath())
+                {
+                    path.AddPolygon(bolt);
+                    using (var halo = new Pen(Bg, S(2.4f)) { LineJoin = LineJoin.Round }) g.DrawPath(halo, path);
+                    using (var b = new SolidBrush(Fg)) g.FillPath(b, path);
+                }
+            }
+        }
+
+        // The font the Windows 11 taskbar draws its battery with ("SysBatt Fluent Icons"). It isn't
+        // installed for other programs, so it's loaded from the taskbar's own files; null when absent.
+        static System.Drawing.Text.PrivateFontCollection trayBatteryFonts;
+        static FontFamily trayBatteryFamily;
+        static bool trayBatteryTried;
+        static FontFamily TrayBatteryFamily()
+        {
+            if (trayBatteryTried) return trayBatteryFamily;
+            trayBatteryTried = true;
+            string apps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SystemApps");
+            string[] files = {
+                Path.Combine(apps, @"MicrosoftWindows.Client.Core_cw5n1h2txyewy\SystemTray\Assets\Sysbatt.ttf"),
+                Path.Combine(apps, @"Microsoft.LockApp_cw5n1h2txyewy\Assets\Sysbatt.ttf") };
+            foreach (string f in files)
+                try
+                {
+                    if (!File.Exists(f)) continue;
+                    var c = new System.Drawing.Text.PrivateFontCollection();
+                    c.AddFontFile(f);
+                    if (c.Families.Length == 0) { c.Dispose(); continue; }
+                    trayBatteryFonts = c;
+                    trayBatteryFamily = c.Families[0];
+                    break;
+                }
+                catch { }
+            return trayBatteryFamily;
+        }
+
+        // The battery exactly like the Windows 11 taskbar: an outline glyph in the text color and a
+        // level glyph on top (normal U+F8D0 + 1-10, charging U+F8DB + 1-8 with a bolt, plugged in
+        // U+F8E4 + 1-8 with a plug), green while on the charger, red when low.
+        bool DrawTrayBattery(Graphics g, RectangleF r, int pct, bool charging, bool plugged)
+        {
+            FontFamily fam = TrayBatteryFamily();
+            if (fam == null) return false;
+            int outline, step;
+            if (charging) { outline = 0xF8DB; step = (int)Math.Ceiling(pct * 8 / 100.0); step = Math.Max(1, Math.Min(8, step)); }
+            else if (plugged) { outline = 0xF8E4; step = (int)Math.Ceiling(pct * 8 / 100.0); step = Math.Max(1, Math.Min(8, step)); }
+            else { outline = 0xF8D0; step = (int)Math.Ceiling(pct / 10.0); step = Math.Max(1, Math.Min(10, step)); }
+            Color level = charging || plugged ? Color.FromArgb(108, 203, 95) : pct <= 15 ? Config.Danger : Fg;
+            var box = new RectangleF(r.X - S(4), r.Y - S(6), r.Width + S(8), r.Height + S(12));
+            try
+            {
+                using (var f = new Font(fam, icons != null ? icons.Size : S(16), FontStyle.Regular, GraphicsUnit.Pixel))
+                {
+                    DrawText(g, ((char)outline).ToString(), f, Fg, box, StringAlignment.Center);
+                    DrawText(g, ((char)(outline + step)).ToString(), f, level, box, StringAlignment.Center);
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Windows' own battery glyphs (Segoe Fluent Icons / MDL2 Assets, 0-100% in steps of 10%:
+        // U+EBA0 plain, U+EBAB with the charging bolt), drawn like the taskbar: the outline in the
+        // text color and the level in its own color (green while charging, red when low).
+        bool DrawBatteryGlyph(Graphics g, RectangleF r, int pct, bool charging, bool plugged, Color level)
+        {
+            int step = Math.Max(0, Math.Min(10, (int)Math.Round(pct / 10.0)));
+            int first = charging ? 0xEBAB : 0xEBA0;
+            var box = new RectangleF(r.X - S(4), r.Y - S(6), r.Width + S(8), r.Height + S(12));
+            try
+            {
+                using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                using (var empty = new GraphicsPath())
+                using (var full = new GraphicsPath())
+                {
+                    empty.AddString(((char)first).ToString(), icons.FontFamily, (int)icons.Style, icons.Size, box, fmt);
+                    full.AddString(((char)(first + step)).ToString(), icons.FontFamily, (int)icons.Style, icons.Size, box, fmt);
+                    if (empty.PointCount == 0) return false;
+                    using (var b = new SolidBrush(Fg)) g.FillPath(b, empty);
+                    if (step > 0)
+                        using (var fill = new Region(full))
+                        using (var b = new SolidBrush(level))
+                        {
+                            fill.Exclude(empty);
+                            g.FillRegion(b, fill);
+                        }
+                }
+            }
+            catch { return false; }
+            // Plugged in but not charging (full, or held by the charge limit): a plug over it.
+            if (plugged && !charging) { DrawPlug(g, r, Bg, S(1.4f)); DrawPlug(g, r, Fg, 0); }
+            return true;
         }
 
         void DrawFlyout(Graphics g, float radius)
